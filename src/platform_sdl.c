@@ -1,5 +1,7 @@
 #include "SDL.h"
+#if defined(RENDERER_VULKAN)
 #include <SDL_vulkan.h>
+#endif
 
 #include "platform.h"
 #include "input.h"
@@ -394,8 +396,10 @@ uint32_t platform_store_userdata(const char *name, void *bytes, int32_t len) {
 int main(int argc, char *argv[]) {
 	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER);
 
+#if defined(RENDERER_VULKAN)
 	/* Load Vulkan library explicitly (required on Linux before SDL_Vulkan_CreateSurface) */
 	SDL_Vulkan_LoadLibrary(NULL);
+#endif
 
 	// Figure out the absolute asset and userdata paths. These may either be
 	// supplied at build time through -DPATH_ASSETS=.. and -DPATH_USERDATA=..

@@ -1015,8 +1015,3 @@ void render_textures_dump(const char *path) {
 	stbi_write_png(path, width, height, 4, pixels, 0);
 	free(pixels);
 }
-
-void render_flush_pending_textures(void) {
-	// GL uploads texture pixels synchronously in render_texture_create, so
-	// there is nothing pending to flush here.
-}

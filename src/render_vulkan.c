@@ -3085,6 +3085,8 @@ void render_set_resolution(render_resolution_t res) {
     vulkan_state.backbuffer_recreate_pending = true;
 }
 
+void render_flush_pending_textures(void);
+
 void render_frame_prepare(void) {
     /* Deferred resize: render_set_screen_size / render_set_resolution may be
      * called mid-frame (game_update, SDL event pump). They only set flags.
