@@ -20,13 +20,15 @@ if(NOT PLATFORM IN_LIST platform_options)
 	message(FATAL_ERROR "PLATFORM must be one of ${platform_options}")
 endif()
 
-set(renderer_options "GL" "GLES2" "SOFTWARE" "NULL")
+set(renderer_options "GL" "GLES2" "SOFTWARE" "NULL" "VULKAN")
 set(RENDERER "GL" CACHE STRING "Graphics rendering backend")
 set_property(CACHE RENDERER PROPERTY STRINGS "${renderer_options}")
 if(NOT RENDERER IN_LIST renderer_options)
 	message(FATAL_ERROR "RENDERER must be one of ${renderer_options}")
 endif()
-if("${RENDERER}" MATCHES "GL(ES2)?")
+if("${RENDERER}" STREQUAL "VULKAN")
+	set(using_vulkan true)
+elseif("${RENDERER}" MATCHES "GL(ES2)?")
 	set(using_gl true)
 endif()
 if("${CMAKE_SYSTEM_NAME}" MATCHES "(Linux|FreeBSD)")
@@ -46,6 +48,14 @@ endif()
 find_package(OpenGL)
 find_package(GLEW)
 find_package(SDL2)
+find_package(Vulkan)
+
+if(using_vulkan)
+	find_program(GLSLC glslc)
+	if(NOT GLSLC)
+		message(FATAL_ERROR "glslc not found. Install the Vulkan SDK.")
+	endif()
+endif()
 
 set(common_src
 	src/wipeout/camera.c
@@ -219,6 +229,44 @@ elseif("${RENDERER}" STREQUAL "SOFTWARE")
 elseif("${RENDERER}" STREQUAL "NULL")
 	target_compile_definitions(wipeout PRIVATE "RENDERER_NULL")
 	target_sources(wipeout PRIVATE src/render_null.c)
+elseif("${RENDERER}" STREQUAL "VULKAN")
+	target_compile_definitions(wipeout PRIVATE "RENDERER_VULKAN")
+	target_sources(wipeout PRIVATE src/render_vulkan.c)
+	
+	# Compile GLSL shaders to SPIR-V
+	set(SHADER_SOURCES
+		src/shaders/normal.vert.spvasrc
+		src/shaders/normal.frag.spvasrc
+		src/shaders/lighter.vert.spvasrc
+		src/shaders/lighter.frag.spvasrc
+		src/shaders/post.vert.spvasrc
+		src/shaders/post.frag.spvasrc
+		src/shaders/post_crt.frag.spvasrc
+	)
+	set(COMPILED_SHADERS "")
+	foreach(shader_src ${SHADER_SOURCES})
+		get_filename_component(shader_name ${shader_src} NAME)
+		set(shader_out "${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader_name}.spv")
+		
+		# Detect shader stage from filename
+		set(SHADER_STAGE "vert")
+		if(shader_src MATCHES ".frag.")
+			set(SHADER_STAGE "frag")
+		endif()
+		
+		add_custom_command(
+			OUTPUT "${shader_out}"
+			COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/shaders"
+			COMMAND ${GLSLC} -fshader-stage=${SHADER_STAGE} "${CMAKE_SOURCE_DIR}/${shader_src}" -o "${shader_out}"
+			VERBATIM
+			DEPENDS "${CMAKE_SOURCE_DIR}/${shader_src}"
+		)
+		list(APPEND COMPILED_SHADERS "${shader_out}")
+	endforeach()
+	add_custom_target(vulkan_shaders ALL DEPENDS ${COMPILED_SHADERS})
+	
+	target_include_directories(wipeout PRIVATE ${Vulkan_INCLUDE_DIRS})
+	target_link_libraries(wipeout PUBLIC ${Vulkan_LIBRARIES})
 endif()
 
 if("${PLATFORM}" STREQUAL SDL2)

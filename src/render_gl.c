@@ -627,7 +627,7 @@ void render_frame_end(void) {
 	};
 
 	render_flush();
-	
+
 	// Only here do we have the complete stats
 	memcpy(&end_stats, &running_stats, sizeof(render_stats_t));
 }
@@ -1014,4 +1014,9 @@ void render_textures_dump(const char *path) {
 	glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 	stbi_write_png(path, width, height, 4, pixels, 0);
 	free(pixels);
+}
+
+void render_flush_pending_textures(void) {
+	// GL uploads texture pixels synchronously in render_texture_create, so
+	// there is nothing pending to flush here.
 }

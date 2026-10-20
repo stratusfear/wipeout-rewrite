@@ -1,0 +1,71 @@
+#version 450
+
+layout(location = 0) in vec2 v_uv;
+
+layout(location = 0) out vec4 out_color;
+
+layout(set = 0, binding = 0) uniform sampler2D u_scene;
+
+layout(push_constant) uniform PushConstants {
+    vec2 u_resolution;
+    float u_time;
+} pc;
+
+// CRT effect based on https://www.shadertoy.com/view/Ms23DR
+// by https://github.com/mattiasgustavsson/
+// 1:1 port of GL SHADER_POST_FS_CRT (render_gl.c).
+
+// The quad has v_uv.y=0 at the top (Vulkan), while GL's post quad has
+// v_uv.y=0 at the bottom. GL-space uv (== gl_FragCoord / screen_size) is
+// therefore vec2(v_uv.x, 1.0 - v_uv.y). The backbuffer image is top-origin
+// (row 0 = top), so sampling with GL-space uv requires flipping y.
+vec2 smp_uv(vec2 uv) {
+    return vec2(uv.x, 1.0 - uv.y);
+}
+
+vec2 curve(vec2 uv) {
+    uv = (uv - 0.5) * 2.0;
+    uv *= 1.1;
+    uv.x *= 1.0 + pow((abs(uv.y) / 5.0), 2.0);
+    uv.y *= 1.0 + pow((abs(uv.x) / 4.0), 2.0);
+    uv = (uv / 2.0) + 0.5;
+    uv = uv * 0.92 + 0.04;
+    return uv;
+}
+
+void main() {
+    // frag_coord == GL gl_FragCoord.xy exactly (pixel-center interpolation).
+    vec2 frag_coord = vec2(v_uv.x, 1.0 - v_uv.y) * pc.u_resolution;
+    vec2 uv = curve(frag_coord / pc.u_resolution);
+    vec3 color;
+    float x = sin(0.3 * pc.u_time + uv.y * 21.0) * sin(0.7 * pc.u_time + uv.y * 29.0) * sin(0.3 + 0.33 * pc.u_time + uv.y * 31.0) * 0.0017;
+
+    color.r = texture(u_scene, smp_uv(vec2(x + uv.x + 0.001, uv.y + 0.001))).r + 0.05;
+    color.g = texture(u_scene, smp_uv(vec2(x + uv.x + 0.000, uv.y - 0.002))).g + 0.05;
+    color.b = texture(u_scene, smp_uv(vec2(x + uv.x - 0.002, uv.y + 0.000))).b + 0.05;
+    color.r += 0.08 * texture(u_scene, smp_uv(0.75 * vec2(x + 0.025, -0.027) + vec2(uv.x + 0.001, uv.y + 0.001))).r;
+    color.g += 0.05 * texture(u_scene, smp_uv(0.75 * vec2(x - 0.022, -0.02) + vec2(uv.x + 0.000, uv.y - 0.002))).g;
+    color.b += 0.08 * texture(u_scene, smp_uv(0.75 * vec2(x - 0.02, -0.018) + vec2(uv.x - 0.002, uv.y + 0.000))).b;
+
+    color = clamp(color * 0.6 + 0.4 * color * color * 1.0, 0.0, 1.0);
+
+    float vignette = (0.0 + 1.0 * 16.0 * uv.x * uv.y * (1.0 - uv.x) * (1.0 - uv.y));
+    color *= vec3(pow(vignette, 0.25));
+
+    color *= vec3(0.95, 1.05, 0.95);
+    color *= 2.8;
+
+    float scanlines = clamp(0.35 + 0.35 * sin(3.5 * pc.u_time + uv.y * pc.u_resolution.y * 1.5), 0.0, 1.0);
+
+    float s = pow(scanlines, 1.7);
+    color = color * vec3(0.4 + 0.7 * s);
+
+    color *= 1.0 + 0.01 * sin(110.0 * pc.u_time);
+    if (uv.x < 0.0 || uv.x > 1.0)
+        color *= 0.0;
+    if (uv.y < 0.0 || uv.y > 1.0)
+        color *= 0.0;
+
+    color *= 1.0 - 0.65 * vec3(clamp((mod(frag_coord.x, 2.0) - 1.0) * 2.0, 0.0, 1.0));
+    out_color = vec4(color, 1.0);
+}

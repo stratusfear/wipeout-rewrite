@@ -18,6 +18,7 @@ void system_init(void) {
 	input_init();
 	render_init(platform_screen_size());
 	game_init();
+	render_flush_pending_textures();
 }
 
 void system_cleanup(void) {
@@ -44,7 +45,7 @@ void system_update(void) {
 	}
 	
 	render_frame_prepare();
-	
+
 	game_update();
 
 	render_frame_end();

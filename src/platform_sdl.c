@@ -1,4 +1,5 @@
 #include "SDL.h"
+#include <SDL_vulkan.h>
 
 #include "platform.h"
 #include "input.h"
@@ -58,6 +59,12 @@ uint8_t platform_sdl_axis_map[] = {
 void platform_exit(void) {
 	wants_to_exit = true;
 }
+
+#if defined(RENDERER_VULKAN)
+void *platform_get_window_handle(void) {
+	return (void *)window;
+}
+#endif
 
 SDL_GameController *platform_find_gamepad(void) {
 	for (int i = 0; i < SDL_NumJoysticks(); i++) {
@@ -300,6 +307,32 @@ uint32_t platform_store_userdata(const char *name, void *bytes, int32_t len) {
 	}
 
 
+#elif defined(RENDERER_VULKAN) // ---------------------------------------------
+	#define PLATFORM_WINDOW_FLAGS SDL_WINDOW_VULKAN
+
+	void platform_video_init(void) {
+		// nothing
+	}
+
+	void platform_prepare_frame(void) {
+		// nothing
+	}
+
+	void platform_video_cleanup(void) {
+		// nothing
+	}
+
+	void platform_end_frame(void) {
+		// Present handled by render_frame_end() via vkQueuePresentKHR
+	}
+
+	vec2i_t platform_screen_size(void) {
+		int width, height;
+		SDL_Vulkan_GetDrawableSize(window, &width, &height);
+		return vec2i(width, height);
+	}
+
+
 #elif defined(RENDERER_SOFTWARE) || defined(RENDERER_NULL)// -------------------
 	#define PLATFORM_WINDOW_FLAGS 0
 	static SDL_Renderer *renderer;
@@ -360,6 +393,9 @@ uint32_t platform_store_userdata(const char *name, void *bytes, int32_t len) {
 
 int main(int argc, char *argv[]) {
 	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER);
+
+	/* Load Vulkan library explicitly (required on Linux before SDL_Vulkan_CreateSurface) */
+	SDL_Vulkan_LoadLibrary(NULL);
 
 	// Figure out the absolute asset and userdata paths. These may either be
 	// supplied at build time through -DPATH_ASSETS=.. and -DPATH_USERDATA=..

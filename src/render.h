@@ -68,4 +68,7 @@ uint16_t render_textures_len(void);
 void render_textures_reset(uint16_t len);
 void render_textures_dump(const char *path);
 
+/* Flush pending texture uploads (called after game_init completes) */
+void render_flush_pending_textures(void);
+
 #endif
