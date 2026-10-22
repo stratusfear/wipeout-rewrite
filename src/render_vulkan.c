@@ -455,6 +455,7 @@ static struct vulkan_state {
      * single buffer with double-buffered frames. */
     VkBuffer vertex_buffers[MAX_FRAMES_IN_FLIGHT];
     VkDeviceMemory vertex_buffer_memories[MAX_FRAMES_IN_FLIGHT];
+    void *vertex_buffer_ptrs[MAX_FRAMES_IN_FLIGHT]; /* persistent map, whole buffer */
     uint32_t vertex_count;
     uint32_t vertex_flushed; /* vertices already uploaded+drawn this frame */
     vertex_t *vertex_data; /* host-side staging */
@@ -1501,6 +1502,9 @@ void render_cleanup(void) {
     /* Destroy per-frame vertex buffers */
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (vulkan_state.vertex_buffer_memories[i] != VK_NULL_HANDLE) {
+            if (vulkan_state.vertex_buffer_ptrs[i])
+                vkUnmapMemory_fn(vulkan_state.device, vulkan_state.vertex_buffer_memories[i]);
+            vulkan_state.vertex_buffer_ptrs[i] = NULL;
             vkFreeMemory_fn(vulkan_state.device, vulkan_state.vertex_buffer_memories[i], NULL);
             vulkan_state.vertex_buffer_memories[i] = VK_NULL_HANDLE;
         }
@@ -2329,6 +2333,20 @@ static bool create_vertex_buffer(void) {
             vulkan_state.vertex_buffers[i] = VK_NULL_HANDLE;
             return false;
         }
+
+        /* Memory is HOST_COHERENT and the GPU only reads these buffers, so map
+         * each one once for the lifetime of the renderer and memcpy into the
+         * persistent pointer on flush (no per-flush map/unmap). */
+        void *data;
+        if (vkMapMemory_fn(vulkan_state.device, vulkan_state.vertex_buffer_memories[i], 0,
+                           buffer_ci.size, 0, &data) != VK_SUCCESS) {
+            vkFreeMemory_fn(vulkan_state.device, vulkan_state.vertex_buffer_memories[i], NULL);
+            vulkan_state.vertex_buffer_memories[i] = VK_NULL_HANDLE;
+            vkDestroyBuffer_fn(vulkan_state.device, vulkan_state.vertex_buffers[i], NULL);
+            vulkan_state.vertex_buffers[i] = VK_NULL_HANDLE;
+            return false;
+        }
+        vulkan_state.vertex_buffer_ptrs[i] = data;
     }
 
     return true;
@@ -2336,12 +2354,10 @@ static bool create_vertex_buffer(void) {
 
 static void upload_vertex_buffer(uint32_t frame_index, uint32_t offset, uint32_t vertex_count) {
     if (vertex_count == 0) return;
-    void *data;
-    vkMapMemory_fn(vulkan_state.device, vulkan_state.vertex_buffer_memories[frame_index],
-                   (VkDeviceSize)offset * sizeof(vertex_t),
-                   sizeof(vertex_t) * vertex_count, 0, &data);
-    memcpy(data, vulkan_state.vertex_data + offset, sizeof(vertex_t) * vertex_count);
-    vkUnmapMemory_fn(vulkan_state.device, vulkan_state.vertex_buffer_memories[frame_index]);
+    /* The buffer memory is mapped once at creation (see create_vertex_buffer);
+     * just memcpy into the persistent mapping. */
+    memcpy((char *)vulkan_state.vertex_buffer_ptrs[frame_index] + offset * sizeof(vertex_t),
+           vulkan_state.vertex_data + offset, sizeof(vertex_t) * vertex_count);
 }
 
 /* Fill a (tw+2B) x (th+2B) border-padded block at the top-left of `dst`,
