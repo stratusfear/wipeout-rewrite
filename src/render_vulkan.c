@@ -1655,13 +1655,25 @@ static VkPresentModeKHR choose_present_mode(VkPhysicalDevice physical_device, Vk
     VkPresentModeKHR *modes = (VkPresentModeKHR *)calloc(mode_count, sizeof(VkPresentModeKHR));
     vkGetPhysicalDeviceSurfacePresentModesKHR_fn(physical_device, surface, &mode_count, modes);
 
-    /* Always use FIFO to avoid MAILBOX semaphore chain deadlocks.
-     * With per-frame fences and per-image semaphores, FIFO provides
-     * correct synchronization without the acquire-present deadlock. */
+    /* Prefer MAILBOX when the surface offers it: the presentation engine
+     * replaces its single pending present with each new one instead of
+     * queueing behind earlier presents, so a frame rendered before vsync is
+     * not delayed by frames queued ahead of it (FIFO can waste a present).
+     *
+     * The classic MAILBOX acquire deadlock does not apply here:
+     *  - acquire happens while we hold no swapchain image — the timeline
+     *    wait above guarantees this slot's previous submit completed, so
+     *    image_acquired_semaphores[f] has no pending wait and is free to be
+     *    re-signaled (VUID-vkAcquireNextImageKHR-semaphore-01779);
+     *  - the acquire timeout is finite (see render_frame_prepare), so a
+     *    surface that cannot make forward progress (e.g. minimized) yields
+     *    VK_TIMEOUT and a skipped frame instead of a hang, per
+     *    VUID-vkAcquireNextImageKHR-surface-07783.
+     * Fall back to FIFO — the only mode guaranteed to be offered. */
     for (uint32_t i = 0; i < mode_count; i++) {
-        if (modes[i] == VK_PRESENT_MODE_FIFO_KHR) {
+        if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
             free(modes);
-            return VK_PRESENT_MODE_FIFO_KHR;
+            return VK_PRESENT_MODE_MAILBOX_KHR;
         }
     }
     free(modes);
@@ -1743,6 +1755,8 @@ static bool create_swapchain(VkSwapchainKHR old_swapchain) {
         vulkan_state.surface_color_space = surface_format.colorSpace;
     }
     VkPresentModeKHR present_mode = choose_present_mode(vulkan_state.physical_device, vulkan_state.surface);
+    printf("Vulkan: swapchain present mode: %s\n",
+           present_mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO");
     vulkan_state.swapchain_extent = choose_extent(&caps, vulkan_state.screen_size);
 
     /* Sync screen_size to swapchain_extent — on Wayland screen_size may be
@@ -3074,13 +3088,29 @@ void render_frame_prepare(void) {
      * does not start rendering until the presentation engine has
      * released the image.  This fixes the VUID-01780 spec violation
      * (both semaphore/fence NULL) that caused the driver to
-     * deadlock on FIFO present mode. */
+     * deadlock on FIFO present mode.
+     *
+     * The timeout is finite, not UINT64_MAX: when the window is minimized
+     * the compositor may stop presenting this surface, in which case
+     * forward progress for acquire is not guaranteed and a blocking call
+     * would hang the game (VUID-vkAcquireNextImageKHR-surface-07783
+     * forbids UINT64_MAX in that case). 100ms covers several vsync
+     * intervals at any common refresh rate, so a visible window never
+     * times out spuriously; a non-presenting one yields VK_TIMEOUT and we
+     * skip the frame (command_buffer stays NULL, render_frame_end's guard
+     * drops it) and retry next frame — the same path as OUT_OF_DATE. */
     VkResult acquire_result = vkAcquireNextImageKHR_fn(vulkan_state.device, vulkan_state.swapchain,
-                             UINT64_MAX,
+                             100ull * 1000 * 1000,
                              vulkan_state.image_acquired_semaphores[f],
                              VK_NULL_HANDLE,
                              &vulkan_state.current_swapchain_image);
     if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR || acquire_result == VK_SUBOPTIMAL_KHR) {
+        return;
+    }
+    if (acquire_result == VK_TIMEOUT || acquire_result == VK_NOT_READY) {
+        /* No image available within the timeout (e.g. window minimized and
+         * the presentation engine stopped releasing images). Skip this
+         * frame and retry next frame — never block indefinitely. */
         return;
     }
 
