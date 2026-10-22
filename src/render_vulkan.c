@@ -3637,7 +3637,7 @@ void render_set_screen_size(vec2i_t size) {
 }
 
 void render_set_post_effect(render_post_effect_t post) {
-    error_if(post < 0 || post > NUM_RENDER_POST_EFFECTS, "Invalid post effect %d", post);
+    error_if(post < 0 || post >= NUM_RENDER_POST_EFFECTS, "Invalid post effect %d", post);
     vulkan_state.current_post_effect = post;
 }
 
