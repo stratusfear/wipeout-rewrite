@@ -13,6 +13,19 @@
 #include "utils.h"
 #include "system.h"
 
+/* VK_CHECK: assert that a Vulkan call returned VK_SUCCESS. On failure it
+ * reports the VkResult and aborts through the project's fatal path (die,
+ * which prints file/line). Use only for non-recoverable failures — never
+ * for calls whose OUT_OF_DATE / SUBOPTIMAL / TIMEOUT results are handled
+ * as normal control flow (swapchain acquire/present). */
+#define VK_CHECK(expr) \
+    do { \
+        VkResult vk_check_result_ = (expr); \
+        if (vk_check_result_ != VK_SUCCESS) { \
+            die("Vulkan call failed with result %d", (int)vk_check_result_); \
+        } \
+    } while (0)
+
 /* ------------------------------------------------------------------ */
 /* Vulkan loader                                                        */
 /* ------------------------------------------------------------------ */
@@ -1269,7 +1282,8 @@ void render_init(vec2i_t screen_size) {
         alloc_ci.allocationSize = mem_reqs.size;
         alloc_ci.memoryTypeIndex = find_memory_type(vulkan_state.physical_device, mem_reqs.memoryTypeBits,
                                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL, &vulkan_state.upload_staging_memory) != VK_SUCCESS) {
+        if (alloc_ci.memoryTypeIndex == UINT32_MAX ||
+            vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL, &vulkan_state.upload_staging_memory) != VK_SUCCESS) {
             vkDestroyBuffer_fn(vulkan_state.device, vulkan_state.upload_staging_buffer, NULL);
             vulkan_state.upload_staging_buffer = VK_NULL_HANDLE;
             goto cleanup;
@@ -1401,7 +1415,8 @@ void render_init(vec2i_t screen_size) {
         alloc_ci.memoryTypeIndex = find_memory_type(vulkan_state.physical_device, mem_reqs.memoryTypeBits,
                                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-        if (vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL, &vulkan_state.quad_vertex_buffer_memory) != VK_SUCCESS) {
+        if (alloc_ci.memoryTypeIndex == UINT32_MAX ||
+            vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL, &vulkan_state.quad_vertex_buffer_memory) != VK_SUCCESS) {
             vkDestroyBuffer_fn(vulkan_state.device, vulkan_state.quad_vertex_buffer, NULL);
             vulkan_state.quad_vertex_buffer = VK_NULL_HANDLE;
             goto cleanup;
@@ -1636,7 +1651,9 @@ static uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t type
         }
     }
     fprintf(stderr, "Failed to find suitable memory type\n");
-    return 0;
+    /* UINT32_MAX is never a valid memoryTypeIndex; callers must check for it
+     * and fail rather than bind/allocate with an out-of-range index. */
+    return UINT32_MAX;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1946,7 +1963,8 @@ static bool create_image(uint32_t width, uint32_t height, uint32_t mip_levels,
     alloc_ci.allocationSize = mem_reqs.size;
     alloc_ci.memoryTypeIndex = find_memory_type(vulkan_state.physical_device, mem_reqs.memoryTypeBits, mem_props);
 
-    if (vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL, out_memory) != VK_SUCCESS) {
+    if (alloc_ci.memoryTypeIndex == UINT32_MAX ||
+        vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL, out_memory) != VK_SUCCESS) {
         vkDestroyImage_fn(vulkan_state.device, *out_image, NULL);
         *out_image = VK_NULL_HANDLE;
         return false;
@@ -2077,11 +2095,11 @@ static void transition_image_layout_with_pool(VkImage image, VkImageLayout old_l
     alloc_ci.commandBufferCount = 1;
 
     VkCommandBuffer command_buffer;
-    vkAllocateCommandBuffers_fn(vulkan_state.device, &alloc_ci, &command_buffer);
+    VK_CHECK(vkAllocateCommandBuffers_fn(vulkan_state.device, &alloc_ci, &command_buffer));
 
     VkCommandBufferBeginInfo begin_ci = {0};
     begin_ci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    vkBeginCommandBuffer_fn(command_buffer, &begin_ci);
+    VK_CHECK(vkBeginCommandBuffer_fn(command_buffer, &begin_ci));
 
     VkImageMemoryBarrier barrier = {0};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -2147,7 +2165,7 @@ static void transition_image_layout_with_pool(VkImage image, VkImageLayout old_l
     vkCmdPipelineBarrier_fn(command_buffer, src_stage, dst_stage, 0,
                             0, NULL, 0, NULL, 1, &barrier);
 
-    vkEndCommandBuffer_fn(command_buffer);
+    VK_CHECK(vkEndCommandBuffer_fn(command_buffer));
 
     VkSubmitInfo submit_info = {0};
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -2157,9 +2175,9 @@ static void transition_image_layout_with_pool(VkImage image, VkImageLayout old_l
     VkFence fence;
     VkFenceCreateInfo fence_ci = {0};
     fence_ci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    vkCreateFence_fn(vulkan_state.device, &fence_ci, NULL, &fence);
-    vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit_info, fence);
-    vkWaitForFences_fn(vulkan_state.device, 1, &fence, VK_TRUE, UINT64_MAX);
+    VK_CHECK(vkCreateFence_fn(vulkan_state.device, &fence_ci, NULL, &fence));
+    VK_CHECK(vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit_info, fence));
+    VK_CHECK(vkWaitForFences_fn(vulkan_state.device, 1, &fence, VK_TRUE, UINT64_MAX));
     vkDestroyFence_fn(vulkan_state.device, fence, NULL);
 
     vkFreeCommandBuffers_fn(vulkan_state.device, pool, 1, &command_buffer);
@@ -2223,7 +2241,7 @@ static bool create_backbuffer(void) {
         view_ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         view_ci.subresourceRange.levelCount = 1;
         view_ci.subresourceRange.layerCount = 1;
-        vkCreateImageView_fn(vulkan_state.device, &view_ci, NULL, &vulkan_state.backbuffer_image_view);
+        VK_CHECK(vkCreateImageView_fn(vulkan_state.device, &view_ci, NULL, &vulkan_state.backbuffer_image_view));
     }
 
     /* Depth image view */
@@ -2236,7 +2254,7 @@ static bool create_backbuffer(void) {
         view_ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
         view_ci.subresourceRange.levelCount = 1;
         view_ci.subresourceRange.layerCount = 1;
-        vkCreateImageView_fn(vulkan_state.device, &view_ci, NULL, &vulkan_state.backbuffer_depth_image_view);
+        VK_CHECK(vkCreateImageView_fn(vulkan_state.device, &view_ci, NULL, &vulkan_state.backbuffer_depth_image_view));
     }
 
     /* Backbuffer starts undefined — lazily transitioned on first frame */
@@ -2340,7 +2358,8 @@ static bool create_vertex_buffer(void) {
         alloc_ci.memoryTypeIndex = find_memory_type(vulkan_state.physical_device, mem_reqs.memoryTypeBits,
                                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-        if (vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL,
+        if (alloc_ci.memoryTypeIndex == UINT32_MAX ||
+            vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL,
                                 &vulkan_state.vertex_buffer_memories[i]) != VK_SUCCESS) {
             vkDestroyBuffer_fn(vulkan_state.device, vulkan_state.vertex_buffers[i], NULL);
             vulkan_state.vertex_buffers[i] = VK_NULL_HANDLE;
@@ -2491,7 +2510,7 @@ static bool create_atlas(void) {
         view_ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         view_ci.subresourceRange.levelCount = ATLAS_MIP_LEVELS;
         view_ci.subresourceRange.layerCount = 1;
-        vkCreateImageView_fn(vulkan_state.device, &view_ci, NULL, &vulkan_state.atlas_image_view);
+        VK_CHECK(vkCreateImageView_fn(vulkan_state.device, &view_ci, NULL, &vulkan_state.atlas_image_view));
     }
 
     /* Atlas starts undefined — will be lazily transitioned on first frame */
@@ -3122,7 +3141,7 @@ void render_frame_prepare(void) {
     timeline_wait.semaphoreCount = 1;
     timeline_wait.pSemaphores = &vulkan_state.timeline_semaphore;
     timeline_wait.pValues = &vulkan_state.slot_fence_value[f];
-    vkWaitSemaphores_fn(vulkan_state.device, &timeline_wait, UINT64_MAX);
+    VK_CHECK(vkWaitSemaphores_fn(vulkan_state.device, &timeline_wait, UINT64_MAX));
 
     /* Acquire next swapchain image, signaling an image-available
      * semaphore.  The semaphore is waited on during submit so the GPU
@@ -3458,7 +3477,7 @@ void render_frame_end(void) {
                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                             0, 0, NULL, 0, NULL, 1, &present_barrier);
     /* End command buffer recording */
-    vkEndCommandBuffer_fn(vulkan_state.command_buffer);
+    VK_CHECK(vkEndCommandBuffer_fn(vulkan_state.command_buffer));
     /* Submit to queue:
      * - wait_semaphore = image_acquired_semaphores[f] (ensures the
      *   presentation engine has finished reading from the image).
@@ -3498,7 +3517,7 @@ void render_frame_end(void) {
     submit_info.signalSemaphoreCount = 2;
     submit_info.pSignalSemaphores = signal_semaphores;
 
-    vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    VK_CHECK(vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit_info, VK_NULL_HANDLE));
 
     /* Present — wait only on the binary render-complete semaphore
      * (vkQueuePresentKHR does not accept timeline semaphores). */
@@ -4045,15 +4064,15 @@ void render_flush_pending_textures(void) {
     uint32_t buf_size = atlas_width * atlas_height * pixel_size;
 
     /* Allocate a single staging buffer for all uploads */
-    VkBuffer staging_buffer;
-    VkDeviceMemory staging_memory;
+    VkBuffer staging_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
     {
         VkBufferCreateInfo buf_ci = {0};
         buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         buf_ci.size = buf_size;
         buf_ci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         buf_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        vkCreateBuffer_fn(vulkan_state.device, &buf_ci, NULL, &staging_buffer);
+        VK_CHECK(vkCreateBuffer_fn(vulkan_state.device, &buf_ci, NULL, &staging_buffer));
 
         VkMemoryRequirements mem_reqs;
         vkGetBufferMemoryRequirements_fn(vulkan_state.device, staging_buffer, &mem_reqs);
@@ -4063,13 +4082,16 @@ void render_flush_pending_textures(void) {
         alloc_ci.allocationSize = mem_reqs.size;
         alloc_ci.memoryTypeIndex = find_memory_type(vulkan_state.physical_device, mem_reqs.memoryTypeBits,
                                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL, &staging_memory);
-        vkBindBufferMemory_fn(vulkan_state.device, staging_buffer, staging_memory, 0);
+        if (alloc_ci.memoryTypeIndex == UINT32_MAX) {
+            goto cleanup_staging;
+        }
+        VK_CHECK(vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL, &staging_memory));
+        VK_CHECK(vkBindBufferMemory_fn(vulkan_state.device, staging_buffer, staging_memory, 0));
     }
 
     /* Map and fill atlas with all textures in one go */
     void *data;
-    vkMapMemory_fn(vulkan_state.device, staging_memory, 0, buf_size, 0, &data);
+    VK_CHECK(vkMapMemory_fn(vulkan_state.device, staging_memory, 0, buf_size, 0, &data));
     memset(data, 0, buf_size);
 
     for (uint32_t i = 0; i < vulkan_state.pending_uploads_len; i++) {
@@ -4109,11 +4131,11 @@ void render_flush_pending_textures(void) {
         alloc_ci_cb.commandPool = flush_pool;
         alloc_ci_cb.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         alloc_ci_cb.commandBufferCount = 1;
-        vkAllocateCommandBuffers_fn(vulkan_state.device, &alloc_ci_cb, &command_buffer);
+        VK_CHECK(vkAllocateCommandBuffers_fn(vulkan_state.device, &alloc_ci_cb, &command_buffer));
 
         VkCommandBufferBeginInfo begin_ci = {0};
         begin_ci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        vkBeginCommandBuffer_fn(command_buffer, &begin_ci);
+        VK_CHECK(vkBeginCommandBuffer_fn(command_buffer, &begin_ci));
 
         /* All mip levels -> TRANSFER_DST_OPTIMAL (clears to black on first upload) */
         atlas_to_transfer_dst(command_buffer);
@@ -4141,7 +4163,7 @@ void render_flush_pending_textures(void) {
         /* Generate mip levels 1..N-1 and transition all levels to SHADER_READ_ONLY_OPTIMAL */
         atlas_generate_mips_and_finish(command_buffer, atlas_width, atlas_height);
 
-        vkEndCommandBuffer_fn(command_buffer);
+        VK_CHECK(vkEndCommandBuffer_fn(command_buffer));
     }
 
     /* Submit and wait */
@@ -4149,7 +4171,7 @@ void render_flush_pending_textures(void) {
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &command_buffer;
-    vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
+    VK_CHECK(vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit_info, VK_NULL_HANDLE));
     vkQueueWaitIdle_fn(vulkan_state.graphics_queue);
 
     /* Cleanup */
@@ -4280,11 +4302,11 @@ uint16_t render_texture_create(uint32_t width, uint32_t height, rgba_t *pixels) 
                                                       vulkan_state.upload_command_pool, 0);
             (void)reset_r;
 
-            vkBeginCommandBuffer_fn(vulkan_state.upload_command_buffer,
-                                    &(VkCommandBufferBeginInfo){
+            VK_CHECK(vkBeginCommandBuffer_fn(vulkan_state.upload_command_buffer,
+                                             &(VkCommandBufferBeginInfo){
                 .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                 .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            });
+            }));
 
             /* All mip levels -> TRANSFER_DST_OPTIMAL (clears to black on first upload) */
             atlas_to_transfer_dst(vulkan_state.upload_command_buffer);
@@ -4296,13 +4318,13 @@ uint16_t render_texture_create(uint32_t width, uint32_t height, rgba_t *pixels) 
             /* Generate mip levels 1..N-1 and transition all levels to SHADER_READ_ONLY_OPTIMAL */
             atlas_generate_mips_and_finish(vulkan_state.upload_command_buffer, atlas_width, atlas_height);
 
-            vkEndCommandBuffer_fn(vulkan_state.upload_command_buffer);
+            VK_CHECK(vkEndCommandBuffer_fn(vulkan_state.upload_command_buffer));
 
             VkSubmitInfo submit = {0};
             submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             submit.commandBufferCount = 1;
             submit.pCommandBuffers = &vulkan_state.upload_command_buffer;
-            vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit, VK_NULL_HANDLE);
+            VK_CHECK(vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit, VK_NULL_HANDLE));
             vkQueueWaitIdle_fn(vulkan_state.graphics_queue);
 
             /* Update layout tracking */
@@ -4372,11 +4394,11 @@ void render_texture_replace_pixels(int16_t texture_index, rgba_t *pixels) {
         VkResult reset_r = vkResetCommandPool_fn(vulkan_state.device, vulkan_state.upload_command_pool, 0);
         (void)reset_r;
 
-        vkBeginCommandBuffer_fn(vulkan_state.upload_command_buffer,
-                                &(VkCommandBufferBeginInfo){
+        VK_CHECK(vkBeginCommandBuffer_fn(vulkan_state.upload_command_buffer,
+                                         &(VkCommandBufferBeginInfo){
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        });
+        }));
 
         vkCmdPipelineBarrier_fn(vulkan_state.upload_command_buffer,
                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
@@ -4395,13 +4417,13 @@ void render_texture_replace_pixels(int16_t texture_index, rgba_t *pixels) {
                                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
                                 0, NULL, 0, NULL, 1, &barrier);
 
-        vkEndCommandBuffer_fn(vulkan_state.upload_command_buffer);
+        VK_CHECK(vkEndCommandBuffer_fn(vulkan_state.upload_command_buffer));
 
         VkSubmitInfo submit = {0};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &vulkan_state.upload_command_buffer;
-        vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit, VK_NULL_HANDLE);
+        VK_CHECK(vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit, VK_NULL_HANDLE));
         vkQueueWaitIdle_fn(vulkan_state.graphics_queue);
 
         /* Level 0 round-tripped through TRANSFER_DST_OPTIMAL and is back in
