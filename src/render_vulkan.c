@@ -71,10 +71,6 @@ static PFN_vkQueuePresentKHR                        vkQueuePresentKHR_fn;
 static PFN_vkCreateImageView                        vkCreateImageView_fn;
 static PFN_vkDestroyImageView                       vkDestroyImageView_fn;
 
-/* Framebuffers */
-static PFN_vkCreateFramebuffer                      vkCreateFramebuffer_fn;
-static PFN_vkDestroyFramebuffer                     vkDestroyFramebuffer_fn;
-
 /* Sync objects */
 static PFN_vkCreateSemaphore                        vkCreateSemaphore_fn;
 static PFN_vkDestroySemaphore                       vkDestroySemaphore_fn;
@@ -97,8 +93,8 @@ static PFN_vkCmdDraw                                vkCmdDraw_fn;
 static PFN_vkCmdSetDepthBias                        vkCmdSetDepthBias_fn;
 static PFN_vkCmdBindDescriptorSets                    vkCmdBindDescriptorSets_fn;
 static PFN_vkCmdPushConstants                         vkCmdPushConstants_fn;
-static PFN_vkCmdBeginRenderPass                     vkCmdBeginRenderPass_fn;
-static PFN_vkCmdEndRenderPass                       vkCmdEndRenderPass_fn;
+static PFN_vkCmdBeginRendering                      vkCmdBeginRendering_fn;
+static PFN_vkCmdEndRendering                        vkCmdEndRendering_fn;
 static PFN_vkCmdPipelineBarrier                     vkCmdPipelineBarrier_fn;
 static PFN_vkCmdCopyBufferToImage                   vkCmdCopyBufferToImage_fn;
 static PFN_vkCmdBlitImage                          vkCmdBlitImage_fn;
@@ -121,10 +117,6 @@ static PFN_vkAllocateMemory                         vkAllocateMemory_fn;
 static PFN_vkFreeMemory                             vkFreeMemory_fn;
 static PFN_vkMapMemory                              vkMapMemory_fn;
 static PFN_vkUnmapMemory                            vkUnmapMemory_fn;
-
-/* Render pass */
-static PFN_vkCreateRenderPass                       vkCreateRenderPass_fn;
-static PFN_vkDestroyRenderPass                      vkDestroyRenderPass_fn;
 
 /* Pipeline */
 static PFN_vkCreateGraphicsPipelines                vkCreateGraphicsPipelines_fn;
@@ -189,12 +181,6 @@ static bool load_device_functions(VkDevice device, VkInstance instance) {
     vkDestroyImageView_fn = (PFN_vkDestroyImageView)load_device_fn(device, instance, "vkDestroyImageView");
     if (!vkDestroyImageView_fn) { fprintf(stderr, "Failed to load vkDestroyImageView\n"); return false; }
 
-    /* Framebuffers */
-    vkCreateFramebuffer_fn = (PFN_vkCreateFramebuffer)load_device_fn(device, instance, "vkCreateFramebuffer");
-    if (!vkCreateFramebuffer_fn) { fprintf(stderr, "Failed to load vkCreateFramebuffer\n"); return false; }
-    vkDestroyFramebuffer_fn = (PFN_vkDestroyFramebuffer)load_device_fn(device, instance, "vkDestroyFramebuffer");
-    if (!vkDestroyFramebuffer_fn) { fprintf(stderr, "Failed to load vkDestroyFramebuffer\n"); return false; }
-
     /* Sync objects */
     vkCreateSemaphore_fn = (PFN_vkCreateSemaphore)load_device_fn(device, instance, "vkCreateSemaphore");
     if (!vkCreateSemaphore_fn) { fprintf(stderr, "Failed to load vkCreateSemaphore\n"); return false; }
@@ -236,10 +222,10 @@ static bool load_device_functions(VkDevice device, VkInstance instance) {
     if (!vkCmdBindDescriptorSets_fn) { fprintf(stderr, "Failed to load vkCmdBindDescriptorSets\n"); return false; }
     vkCmdPushConstants_fn = (PFN_vkCmdPushConstants)load_device_fn(device, instance, "vkCmdPushConstants");
     if (!vkCmdPushConstants_fn) { fprintf(stderr, "Failed to load vkCmdPushConstants\n"); return false; }
-    vkCmdBeginRenderPass_fn = (PFN_vkCmdBeginRenderPass)load_device_fn(device, instance, "vkCmdBeginRenderPass");
-    if (!vkCmdBeginRenderPass_fn) { fprintf(stderr, "Failed to load vkCmdBeginRenderPass\n"); return false; }
-    vkCmdEndRenderPass_fn = (PFN_vkCmdEndRenderPass)load_device_fn(device, instance, "vkCmdEndRenderPass");
-    if (!vkCmdEndRenderPass_fn) { fprintf(stderr, "Failed to load vkCmdEndRenderPass\n"); return false; }
+    vkCmdBeginRendering_fn = (PFN_vkCmdBeginRendering)load_device_fn(device, instance, "vkCmdBeginRendering");
+    if (!vkCmdBeginRendering_fn) { fprintf(stderr, "Failed to load vkCmdBeginRendering\n"); return false; }
+    vkCmdEndRendering_fn = (PFN_vkCmdEndRendering)load_device_fn(device, instance, "vkCmdEndRendering");
+    if (!vkCmdEndRendering_fn) { fprintf(stderr, "Failed to load vkCmdEndRendering\n"); return false; }
     vkCmdPipelineBarrier_fn = (PFN_vkCmdPipelineBarrier)load_device_fn(device, instance, "vkCmdPipelineBarrier");
     if (!vkCmdPipelineBarrier_fn) { fprintf(stderr, "Failed to load vkCmdPipelineBarrier\n"); return false; }
     vkCmdCopyBufferToImage_fn = (PFN_vkCmdCopyBufferToImage)load_device_fn(device, instance, "vkCmdCopyBufferToImage");
@@ -278,10 +264,6 @@ static bool load_device_functions(VkDevice device, VkInstance instance) {
     if (!vkUnmapMemory_fn) { fprintf(stderr, "Failed to load vkUnmapMemory\n"); return false; }
 
     /* Render pass */
-    vkCreateRenderPass_fn = (PFN_vkCreateRenderPass)load_device_fn(device, instance, "vkCreateRenderPass");
-    if (!vkCreateRenderPass_fn) { fprintf(stderr, "Failed to load vkCreateRenderPass\n"); return false; }
-    vkDestroyRenderPass_fn = (PFN_vkDestroyRenderPass)load_device_fn(device, instance, "vkDestroyRenderPass");
-    if (!vkDestroyRenderPass_fn) { fprintf(stderr, "Failed to load vkDestroyRenderPass\n"); return false; }
 
     /* Pipeline */
     vkCreateGraphicsPipelines_fn = (PFN_vkCreateGraphicsPipelines)load_device_fn(device, instance, "vkCreateGraphicsPipelines");
@@ -343,10 +325,7 @@ static VkDebugUtilsMessengerEXT debug_callback = VK_NULL_HANDLE;
 static bool create_swapchain(VkSwapchainKHR old_swapchain);
 static void destroy_swapchain(void);
 static void destroy_swapchain_resources(VkSwapchainKHR swapchain, VkImage *images,
-                                        VkImageView *views, VkFramebuffer *framebuffers,
-                                        uint32_t count);
-static bool create_framebuffers(void);
-static bool create_render_pass(void);
+                                        VkImageView *views, uint32_t count);
 static void destroy_backbuffer(void);
 static bool create_backbuffer(void);
 static bool create_vertex_buffer(void);
@@ -414,9 +393,6 @@ static struct vulkan_state {
     VkImage *swapchain_images;
     VkImageView *swapchain_image_views;
 
-    /* Frame buffers (one per swapchain image) */
-    VkFramebuffer *framebuffers;
-
     /* Sync objects:
      * - image_acquired_semaphores[] indexed by frame slot (per-frame). Binary —
      *   VUID-VkAcquireNextImageInfoKHR-semaphore-03266 requires
@@ -446,7 +422,6 @@ static struct vulkan_state {
     VkImage backbuffer_depth_image;
     VkDeviceMemory backbuffer_depth_image_memory;
     VkImageView backbuffer_depth_image_view;
-    VkFramebuffer backbuffer_framebuffer;
     vec2i_t backbuffer_size;
     render_resolution_t render_res;
 
@@ -458,8 +433,7 @@ static struct vulkan_state {
     int swapchain_recreate_pending;
     int backbuffer_recreate_pending;
 
-    /* Render pass + pipeline state */
-    VkRenderPass render_pass;
+    /* Pipeline state */
     VkPipelineLayout pipeline_layout;
     /* Game-pass pipelines: one variant per (blend mode) x (depth test, depth
      * write, cull backface) combo. Depth test/write, cull mode and front face
@@ -513,9 +487,6 @@ static struct vulkan_state {
     VkDescriptorPool descriptor_pool;
     VkDescriptorSet atlas_descriptor_set;
     VkDescriptorSet backbuffer_descriptor_set;
-
-    /* Post-process render pass */
-    VkRenderPass post_render_pass;
 
     /* Full-screen quad for post-process pass */
     VkBuffer quad_vertex_buffer;
@@ -779,10 +750,6 @@ void render_init(vec2i_t screen_size) {
     LOAD_FN_INSTANCE(vkCreateImageView_fn, vkCreateImageView)
     LOAD_FN_INSTANCE(vkDestroyImageView_fn, vkDestroyImageView)
 
-    /* Framebuffers */
-    LOAD_FN_INSTANCE(vkCreateFramebuffer_fn, vkCreateFramebuffer)
-    LOAD_FN_INSTANCE(vkDestroyFramebuffer_fn, vkDestroyFramebuffer)
-
     /* Sync objects */
     LOAD_FN_INSTANCE(vkCreateSemaphore_fn, vkCreateSemaphore)
     LOAD_FN_INSTANCE(vkDestroySemaphore_fn, vkDestroySemaphore)
@@ -804,8 +771,8 @@ void render_init(vec2i_t screen_size) {
     LOAD_FN_INSTANCE(vkCmdDraw_fn, vkCmdDraw)
     LOAD_FN_INSTANCE(vkCmdBindDescriptorSets_fn, vkCmdBindDescriptorSets)
     LOAD_FN_INSTANCE(vkCmdPushConstants_fn, vkCmdPushConstants)
-    LOAD_FN_INSTANCE(vkCmdBeginRenderPass_fn, vkCmdBeginRenderPass)
-    LOAD_FN_INSTANCE(vkCmdEndRenderPass_fn, vkCmdEndRenderPass)
+    LOAD_FN_INSTANCE(vkCmdBeginRendering_fn, vkCmdBeginRendering)
+    LOAD_FN_INSTANCE(vkCmdEndRendering_fn, vkCmdEndRendering)
     LOAD_FN_INSTANCE(vkCmdPipelineBarrier_fn, vkCmdPipelineBarrier)
     LOAD_FN_INSTANCE(vkCmdCopyBufferToImage_fn, vkCmdCopyBufferToImage)
     LOAD_FN_INSTANCE(vkCmdBlitImage_fn, vkCmdBlitImage)
@@ -827,10 +794,6 @@ void render_init(vec2i_t screen_size) {
     LOAD_FN_INSTANCE(vkFreeMemory_fn, vkFreeMemory)
     LOAD_FN_INSTANCE(vkMapMemory_fn, vkMapMemory)
     LOAD_FN_INSTANCE(vkUnmapMemory_fn, vkUnmapMemory)
-
-    /* Render pass */
-    LOAD_FN_INSTANCE(vkCreateRenderPass_fn, vkCreateRenderPass)
-    LOAD_FN_INSTANCE(vkDestroyRenderPass_fn, vkDestroyRenderPass)
 
     /* Pipeline */
     LOAD_FN_INSTANCE(vkCreateGraphicsPipelines_fn, vkCreateGraphicsPipelines)
@@ -980,14 +943,17 @@ void render_init(vec2i_t screen_size) {
 
     /* Vulkan 1.3 features, enabled up front so the later modernization
      * steps (timeline semaphores, synchronization2, extended dynamic
-     * state) can use them without another device-creation change. All
-     * four are mandatory on any conformant 1.3 implementation; query
-     * first and fail with a named error if the driver lies about its
-     * version. Note the EDS feature structs keep their EXT names/sTypes
-     * even in 1.3 — only the commands and VkDynamicState values were
-     * promoted to core. */
+     * state, dynamic rendering) can use them without another
+     * device-creation change. All five are mandatory on any conformant 1.3
+     * implementation; query first and fail with a named error if the driver
+     * lies about its version. Note the EDS feature structs keep their EXT
+     * names/sTypes even in 1.3 — only the commands and VkDynamicState values
+     * were promoted to core. */
     VkPhysicalDeviceExtendedDynamicState2FeaturesEXT feat_eds2 = {0};
     feat_eds2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT;
+    VkPhysicalDeviceDynamicRenderingFeatures feat_dyn_render = {0};
+    feat_dyn_render.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+    feat_eds2.pNext = &feat_dyn_render;
     VkPhysicalDeviceExtendedDynamicStateFeaturesEXT feat_eds = {0};
     feat_eds.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT;
     feat_eds.pNext = &feat_eds2;
@@ -1019,12 +985,17 @@ void render_init(vec2i_t screen_size) {
         fprintf(stderr, "Vulkan 1.3 driver missing required feature: extendedDynamicState2\n");
         goto cleanup;
     }
+    if (!feat_dyn_render.dynamicRendering) {
+        fprintf(stderr, "Vulkan 1.3 driver missing required feature: dynamicRendering\n");
+        goto cleanup;
+    }
 
-    /* All four are guaranteed supported by the checks above — enable them. */
+    /* All five are guaranteed supported by the checks above — enable them. */
     feat_timeline.timelineSemaphore = VK_TRUE;
     feat_sync2.synchronization2 = VK_TRUE;
     feat_eds.extendedDynamicState = VK_TRUE;
     feat_eds2.extendedDynamicState2 = VK_TRUE;
+    feat_dyn_render.dynamicRendering = VK_TRUE;
 
     /* The game-pass pipelines only use core 1.0 dynamic states (viewport,
      * scissor, depth bias); depth test/write, cull mode and front face are
@@ -1143,12 +1114,6 @@ void render_init(vec2i_t screen_size) {
         }
     }
 
-    /* -- 12. Create render pass -- */
-    if (!create_render_pass()) {
-        fprintf(stderr, "Failed to create render pass\n");
-        goto cleanup;
-    }
-
     /* -- 12. Create descriptor set layout -- */
     {
         VkDescriptorSetLayoutBinding sampler_binding = {0};
@@ -1207,68 +1172,6 @@ void render_init(vec2i_t screen_size) {
         }
     }
 
-
-    /* -- 15. Create post-process render pass -- */
-    {
-        VkAttachmentDescription color_attachment = {0};
-        color_attachment.format = vulkan_state.swapchain_format;
-        color_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        color_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        color_attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-        VkAttachmentReference color_ref = {0};
-        color_ref.attachment = 0;
-        color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkSubpassDescription subpass = {0};
-        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &color_ref;
-
-        VkSubpassDependency dep_in = {0};
-        dep_in.srcSubpass = VK_SUBPASS_EXTERNAL;
-        dep_in.dstSubpass = 0;
-        dep_in.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep_in.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep_in.srcAccessMask = 0;
-        dep_in.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-        /* Outgoing dependency: ensure post-pass output is visible before
-         * the image is presented or used by the next frame. */
-        VkSubpassDependency dep_out = {0};
-        dep_out.srcSubpass = 0;
-        dep_out.dstSubpass = VK_SUBPASS_EXTERNAL;
-        dep_out.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep_out.dstStageMask = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-        dep_out.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        dep_out.dstAccessMask = 0;
-
-        VkSubpassDependency dependencies[2] = {dep_in, dep_out};
-        VkRenderPassCreateInfo rp_ci = {0};
-        rp_ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        rp_ci.attachmentCount = 1;
-        rp_ci.pAttachments = &color_attachment;
-        rp_ci.subpassCount = 1;
-        rp_ci.pSubpasses = &subpass;
-        rp_ci.dependencyCount = 2;
-        rp_ci.pDependencies = dependencies;
-
-        if (vkCreateRenderPass_fn(vulkan_state.device, &rp_ci, NULL,
-                                  &vulkan_state.post_render_pass) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create post render pass\n");
-            goto cleanup;
-        }
-    }
-
-    /* -- 15.5. Create swapchain framebuffers (needs post_render_pass) -- */
-    if (!create_framebuffers()) {
-        fprintf(stderr, "Failed to create framebuffers\n");
-        goto cleanup;
-    }
 
     /* -- 16. Create backbuffer (off-screen render target) --
      * render_res is NATIVE by default (zero-init), so the backbuffer tracks
@@ -1666,16 +1569,6 @@ void render_cleanup(void) {
         vulkan_state.descriptor_set_layout = VK_NULL_HANDLE;
     }
 
-    /* Destroy render passes */
-    if (vulkan_state.post_render_pass != VK_NULL_HANDLE) {
-        vkDestroyRenderPass_fn(vulkan_state.device, vulkan_state.post_render_pass, NULL);
-        vulkan_state.post_render_pass = VK_NULL_HANDLE;
-    }
-    if (vulkan_state.render_pass != VK_NULL_HANDLE) {
-        vkDestroyRenderPass_fn(vulkan_state.device, vulkan_state.render_pass, NULL);
-        vulkan_state.render_pass = VK_NULL_HANDLE;
-    }
-
     /* Device */
     if (vulkan_state.graphics_queue) {
         vulkan_state.graphics_queue = VK_NULL_HANDLE;
@@ -1923,45 +1816,12 @@ static bool create_swapchain(VkSwapchainKHR old_swapchain) {
     return true;
 }
 
-static bool create_framebuffers(void) {
-    uint32_t swapchain_image_count = vulkan_state.swapchain_image_count;
-
-    vulkan_state.framebuffers = (VkFramebuffer *)calloc(swapchain_image_count, sizeof(VkFramebuffer));
-    for (uint32_t i = 0; i < swapchain_image_count; i++) {
-        VkImageView attachments[] = {vulkan_state.swapchain_image_views[i]};
-        VkFramebufferCreateInfo fb_ci = {0};
-        fb_ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fb_ci.renderPass = vulkan_state.post_render_pass;
-        fb_ci.attachmentCount = 1;
-        fb_ci.pAttachments = attachments;
-        fb_ci.width = vulkan_state.swapchain_extent.width;
-        fb_ci.height = vulkan_state.swapchain_extent.height;
-        fb_ci.layers = 1;
-        if (vkCreateFramebuffer_fn(vulkan_state.device, &fb_ci, NULL, &vulkan_state.framebuffers[i]) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create framebuffer %u\n", i);
-            return false;
-        }
-    }
-
-    return true;
-}
-
-/* Destroy swapchain resources in dependency order: framebuffers reference
- * their attachment image views, and the views belong to the swapchain's
- * images — so framebuffers first, then views, then the swapchain. (The
+/* Destroy swapchain resources in dependency order: image views belong to
+ * the swapchain's images — so views first, then the swapchain. (The
  * object-lifetime rules require destroying referencing objects before the
  * referenced ones.) */
 static void destroy_swapchain_resources(VkSwapchainKHR swapchain, VkImage *images,
-                                        VkImageView *views, VkFramebuffer *framebuffers,
-                                        uint32_t count) {
-    if (framebuffers) {
-        for (uint32_t i = 0; i < count; i++) {
-            if (framebuffers[i] != VK_NULL_HANDLE) {
-                vkDestroyFramebuffer_fn(vulkan_state.device, framebuffers[i], NULL);
-            }
-        }
-        free(framebuffers);
-    }
+                                        VkImageView *views, uint32_t count) {
     if (views) {
         for (uint32_t i = 0; i < count; i++) {
             if (views[i] != VK_NULL_HANDLE) {
@@ -1978,12 +1838,11 @@ static void destroy_swapchain_resources(VkSwapchainKHR swapchain, VkImage *image
 
 static void destroy_swapchain(void) {
     destroy_swapchain_resources(vulkan_state.swapchain, vulkan_state.swapchain_images,
-                                vulkan_state.swapchain_image_views, vulkan_state.framebuffers,
+                                vulkan_state.swapchain_image_views,
                                 vulkan_state.swapchain_image_count);
     vulkan_state.swapchain = VK_NULL_HANDLE;
     vulkan_state.swapchain_images = NULL;
     vulkan_state.swapchain_image_views = NULL;
-    vulkan_state.framebuffers = NULL;
     vulkan_state.swapchain_image_count = 0;
 }
 
@@ -2250,82 +2109,6 @@ static void transition_image_layout_with_pool(VkImage image, VkImageLayout old_l
 }
 
 /* ------------------------------------------------------------------ */
-/* Render pass creation                                                */
-/* ------------------------------------------------------------------ */
-
-static bool create_render_pass(void) {
-    VkAttachmentDescription color_attachment = {0};
-    color_attachment.format = vulkan_state.swapchain_format;
-    color_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    color_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    color_attachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    VkAttachmentDescription attachments[2] = {0};
-    attachments[0] = color_attachment;
-    attachments[1].format = VK_FORMAT_D32_SFLOAT;
-    attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference color_ref = {0};
-    color_ref.attachment = 0;
-    color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference depth_ref = {0};
-    depth_ref.attachment = 1;
-    depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkSubpassDescription subpass = {0};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &color_ref;
-    subpass.pDepthStencilAttachment = &depth_ref;
-
-    VkSubpassDependency dependency_in = {0};
-    dependency_in.srcSubpass = VK_SUBPASS_EXTERNAL;
-    dependency_in.dstSubpass = 0;
-    dependency_in.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency_in.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency_in.srcAccessMask = 0;
-    dependency_in.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-    /* Outgoing: signal when subpass 0 is done (color attachment writes complete),
-     * so subsequent frames know the image is in SHADER_READ_ONLY_OPTIMAL layout. */
-    VkSubpassDependency dependency_out = {0};
-    dependency_out.srcSubpass = 0;
-    dependency_out.dstSubpass = VK_SUBPASS_EXTERNAL;
-    dependency_out.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency_out.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependency_out.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dependency_out.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-    VkSubpassDependency dependencies[2] = {dependency_in, dependency_out};
-
-    VkRenderPassCreateInfo render_pass_ci = {0};
-    render_pass_ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    render_pass_ci.attachmentCount = 2;
-    render_pass_ci.pAttachments = attachments;
-    render_pass_ci.subpassCount = 1;
-    render_pass_ci.pSubpasses = &subpass;
-    render_pass_ci.dependencyCount = 2;
-    render_pass_ci.pDependencies = dependencies;
-
-    if (vkCreateRenderPass_fn(vulkan_state.device, &render_pass_ci, NULL, &vulkan_state.render_pass) != VK_SUCCESS) {
-        return false;
-    }
-
-    return true;
-}
-
-/* ------------------------------------------------------------------ */
 /* Backbuffer creation (off-screen render target)                      */
 /* ------------------------------------------------------------------ */
 
@@ -2399,23 +2182,6 @@ static bool create_backbuffer(void) {
         vkCreateImageView_fn(vulkan_state.device, &view_ci, NULL, &vulkan_state.backbuffer_depth_image_view);
     }
 
-    /* Backbuffer framebuffer */
-    {
-        VkImageView attachments[2] = {
-            vulkan_state.backbuffer_image_view,
-            vulkan_state.backbuffer_depth_image_view
-        };
-        VkFramebufferCreateInfo fb_ci = {0};
-        fb_ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fb_ci.renderPass = vulkan_state.render_pass;
-        fb_ci.attachmentCount = 2;
-        fb_ci.pAttachments = attachments;
-        fb_ci.width = bb_ext.width;
-        fb_ci.height = bb_ext.height;
-        fb_ci.layers = 1;
-        vkCreateFramebuffer_fn(vulkan_state.device, &fb_ci, NULL, &vulkan_state.backbuffer_framebuffer);
-    }
-
     /* Backbuffer starts undefined — lazily transitioned on first frame */
     vulkan_state.backbuffer_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     vulkan_state.backbuffer_depth_layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2441,10 +2207,6 @@ static void destroy_backbuffer(void) {
         vkFreeMemory_fn(vulkan_state.device, vulkan_state.backbuffer_depth_image_memory, NULL);
         vkDestroyImage_fn(vulkan_state.device, vulkan_state.backbuffer_depth_image, NULL);
         vulkan_state.backbuffer_depth_image = VK_NULL_HANDLE;
-    }
-    if (vulkan_state.backbuffer_framebuffer) {
-        vkDestroyFramebuffer_fn(vulkan_state.device, vulkan_state.backbuffer_framebuffer, NULL);
-        vulkan_state.backbuffer_framebuffer = VK_NULL_HANDLE;
     }
 }
 
@@ -2819,8 +2581,21 @@ static VkPipeline create_post_pipeline(VkShaderModule vert, const char *frag_spv
     dyn.dynamicStateCount = 2;
     dyn.pDynamicStates = (VkDynamicState[]){VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
 
+    /* Dynamic rendering (Vulkan 1.3 core): the pipeline is not tied to a
+     * render pass — declare the attachment formats here instead. The post
+     * pass renders to a swapchain image (swapchain_format), no depth. */
+    VkFormat post_color_formats[1] = {vulkan_state.swapchain_format};
+    VkPipelineRenderingCreateInfo post_rendering_ci = {0};
+    post_rendering_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    post_rendering_ci.viewMask = 0;
+    post_rendering_ci.colorAttachmentCount = 1;
+    post_rendering_ci.pColorAttachmentFormats = post_color_formats;
+    post_rendering_ci.depthAttachmentFormat = VK_FORMAT_UNDEFINED;
+    post_rendering_ci.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+
     VkGraphicsPipelineCreateInfo pi = {0};
     pi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pi.pNext = &post_rendering_ci;
     pi.stageCount = 2;
     pi.pStages = stages;
     pi.pVertexInputState = &vi;
@@ -2830,7 +2605,6 @@ static VkPipeline create_post_pipeline(VkShaderModule vert, const char *frag_spv
     pi.pColorBlendState = &cb;
     pi.pDynamicState = &dyn;
     pi.layout = vulkan_state.pipeline_layout;
-    pi.renderPass = vulkan_state.post_render_pass;
     pi.subpass = 0;
 
     VkPipelineMultisampleStateCreateInfo ms = {0};
@@ -2981,8 +2755,21 @@ static VkPipeline create_game_pipeline(VkShaderModule vert, VkShaderModule frag,
     ds.depthBoundsTestEnable = VK_FALSE;
     ds.stencilTestEnable = VK_FALSE;
 
+    /* Dynamic rendering (Vulkan 1.3 core): the pipeline is not tied to a
+     * render pass — declare the attachment formats here instead. The game
+     * pass renders to the backbuffer (swapchain_format color, D32 depth). */
+    VkFormat game_color_formats[1] = {vulkan_state.swapchain_format};
+    VkPipelineRenderingCreateInfo game_rendering_ci = {0};
+    game_rendering_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    game_rendering_ci.viewMask = 0;
+    game_rendering_ci.colorAttachmentCount = 1;
+    game_rendering_ci.pColorAttachmentFormats = game_color_formats;
+    game_rendering_ci.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT;
+    game_rendering_ci.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+
     VkGraphicsPipelineCreateInfo pi = {0};
     pi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pi.pNext = &game_rendering_ci;
     pi.stageCount = 2;
     pi.pStages = stages;
     pi.pVertexInputState = &vi;
@@ -2993,7 +2780,6 @@ static VkPipeline create_game_pipeline(VkShaderModule vert, VkShaderModule frag,
     pi.pColorBlendState = &cb;
     pi.pDynamicState = &dyn;
     pi.layout = vulkan_state.pipeline_layout;
-    pi.renderPass = vulkan_state.render_pass;
     pi.subpass = 0;
 
     VkPipelineMultisampleStateCreateInfo ms = {0};
@@ -3184,21 +2970,19 @@ void render_frame_prepare(void) {
             VkSwapchainKHR old_swapchain = vulkan_state.swapchain;
             VkImage *old_images = vulkan_state.swapchain_images;
             VkImageView *old_views = vulkan_state.swapchain_image_views;
-            VkFramebuffer *old_framebuffers = vulkan_state.framebuffers;
             uint32_t old_count = vulkan_state.swapchain_image_count;
             vulkan_state.swapchain = VK_NULL_HANDLE;
             vulkan_state.swapchain_images = NULL;
             vulkan_state.swapchain_image_views = NULL;
-            vulkan_state.framebuffers = NULL;
             vulkan_state.swapchain_image_count = 0;
 
-            if (!create_swapchain(old_swapchain) || !create_framebuffers()) {
+            if (!create_swapchain(old_swapchain)) {
                 /* Creation failed: old_swapchain is already retired (no more
                  * acquires from it), so destroy it and any partially-created
                  * new resources; retry next frame. */
                 destroy_swapchain();
                 destroy_swapchain_resources(old_swapchain, old_images, old_views,
-                                            old_framebuffers, old_count);
+                                            old_count);
                 return;
             }
 
@@ -3206,7 +2990,7 @@ void render_frame_prepare(void) {
              * memory is freed by the driver only once the presentation
              * engine stops using it (spec-guaranteed). */
             destroy_swapchain_resources(old_swapchain, old_images, old_views,
-                                        old_framebuffers, old_count);
+                                        old_count);
             vulkan_state.swapchain_recreate_pending = false;
         }
 
@@ -3372,18 +3156,38 @@ void render_frame_prepare(void) {
     clear_colors[0].color.float32[3] = 1.0f;
     clear_colors[1].depthStencil.depth = 1.0f;
 
-    VkRenderPassBeginInfo rp_begin = {0};
-    rp_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    rp_begin.renderArea.offset.x = 0;
-    rp_begin.renderArea.offset.y = 0;
+    /* Dynamic rendering (Vulkan 1.3 core): no render pass / framebuffer.
+     * The backbuffer images are already in the declared layouts (transitioned
+     * above) — BeginRendering performs no implicit layout transitions, and
+     * the images remain in these layouts after EndRendering. */
+    VkRenderingAttachmentInfo color_attachment = {0};
+    color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    color_attachment.imageView = vulkan_state.backbuffer_image_view;
+    color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color_attachment.clearValue = clear_colors[0];
 
-    rp_begin.renderPass = vulkan_state.render_pass;
-    rp_begin.renderArea.extent.width = (uint32_t)vulkan_state.backbuffer_size.x;
-    rp_begin.renderArea.extent.height = (uint32_t)vulkan_state.backbuffer_size.y;
-    rp_begin.clearValueCount = 2;
-    rp_begin.pClearValues = clear_colors;
-    rp_begin.framebuffer = vulkan_state.backbuffer_framebuffer;
-    vkCmdBeginRenderPass_fn(vulkan_state.command_buffer, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
+    VkRenderingAttachmentInfo depth_attachment = {0};
+    depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    depth_attachment.imageView = vulkan_state.backbuffer_depth_image_view;
+    depth_attachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth_attachment.clearValue = clear_colors[1];
+
+    VkRenderingInfo rendering_info = {0};
+    rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering_info.renderArea.offset.x = 0;
+    rendering_info.renderArea.offset.y = 0;
+    rendering_info.renderArea.extent.width = (uint32_t)vulkan_state.backbuffer_size.x;
+    rendering_info.renderArea.extent.height = (uint32_t)vulkan_state.backbuffer_size.y;
+    rendering_info.layerCount = 1;
+    rendering_info.viewMask = 0;
+    rendering_info.colorAttachmentCount = 1;
+    rendering_info.pColorAttachments = &color_attachment;
+    rendering_info.pDepthAttachment = &depth_attachment;
+    vkCmdBeginRendering_fn(vulkan_state.command_buffer, &rendering_info);
 
     /* Viewport & scissor (dynamic) */
     VkViewport vp = {0};
@@ -3424,29 +3228,40 @@ void render_frame_end(void) {
     /* Flush any remaining vertices */
     render_flush();
 
-    /* End game render pass */
-    vkCmdEndRenderPass_fn(vulkan_state.command_buffer);
+    /* End game rendering. Dynamic rendering performs no implicit layout
+     * transition, so explicitly transition the backbuffer from
+     * COLOR_ATTACHMENT_OPTIMAL to SHADER_READ_ONLY_OPTIMAL. This barrier
+     * also provides visibility between the game-pass color writes and the
+     * post-pass fragment shader reads — srcStage must be
+     * COLOR_ATTACHMENT_OUTPUT (not TRANSFER) to order the rasterization
+     * writes. */
+    vkCmdEndRendering_fn(vulkan_state.command_buffer);
 
-    /* After EndRenderPass the render pass's finalLayout has already
-     * transitioned the backbuffer to SHADER_READ_ONLY_OPTIMAL. Update
-     * our tracked layout to match, then use a memory barrier (no layout
-     * change) for visibility between game-pass color writes and the
-     * post-pass fragment shader reads. */
-    vulkan_state.backbuffer_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    VkMemoryBarrier bb_mem_barrier = {0};
-    bb_mem_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    bb_mem_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    bb_mem_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    VkImageMemoryBarrier bb_layout_barrier = {0};
+    bb_layout_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    bb_layout_barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    bb_layout_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    bb_layout_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bb_layout_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bb_layout_barrier.image = vulkan_state.backbuffer_image;
+    bb_layout_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    bb_layout_barrier.subresourceRange.levelCount = 1;
+    bb_layout_barrier.subresourceRange.layerCount = 1;
+    bb_layout_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    bb_layout_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier_fn(vulkan_state.command_buffer,
                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                            0, 1, &bb_mem_barrier, 0, NULL, 0, NULL);
+                            0, 0, NULL, 0, NULL, 1, &bb_layout_barrier);
+    vulkan_state.backbuffer_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     /* ---- Post-process pass ---- */
-    /* Don't manually transition swapchain image — the render pass
-     * will transition it from UNDEFINED (vkAcquireNextImageKHR state)
-     * to COLOR_ATTACHMENT_OPTIMAL automatically as a render target. */
+    /* Dynamic rendering performs no implicit layout transitions, so
+     * explicitly transition the acquired swapchain image (UNDEFINED after
+     * vkAcquireNextImageKHR) to COLOR_ATTACHMENT_OPTIMAL. */
+    cmd_transition_image_layout(vulkan_state.swapchain_images[vulkan_state.current_swapchain_image],
+                                VK_IMAGE_LAYOUT_UNDEFINED,
+                                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
     VkClearValue clear_color;
     memset(&clear_color, 0, sizeof(clear_color));
@@ -3455,17 +3270,25 @@ void render_frame_end(void) {
     clear_color.color.float32[2] = 0.0f;
     clear_color.color.float32[3] = 1.0f;
 
-    VkRenderPassBeginInfo post_rp = {0};
-    post_rp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    post_rp.renderPass = vulkan_state.post_render_pass;
-    post_rp.renderArea.offset.x = 0;
-    post_rp.renderArea.offset.y = 0;
-    post_rp.renderArea.extent.width = vulkan_state.swapchain_extent.width;
-    post_rp.renderArea.extent.height = vulkan_state.swapchain_extent.height;
-    post_rp.clearValueCount = 1;
-    post_rp.pClearValues = &clear_color;
-    post_rp.framebuffer = vulkan_state.framebuffers[vulkan_state.current_swapchain_image];
-    vkCmdBeginRenderPass_fn(vulkan_state.command_buffer, &post_rp, VK_SUBPASS_CONTENTS_INLINE);
+    VkRenderingAttachmentInfo post_color_attachment = {0};
+    post_color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    post_color_attachment.imageView = vulkan_state.swapchain_image_views[vulkan_state.current_swapchain_image];
+    post_color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    post_color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    post_color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    post_color_attachment.clearValue = clear_color;
+
+    VkRenderingInfo post_rendering_info = {0};
+    post_rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    post_rendering_info.renderArea.offset.x = 0;
+    post_rendering_info.renderArea.offset.y = 0;
+    post_rendering_info.renderArea.extent.width = vulkan_state.swapchain_extent.width;
+    post_rendering_info.renderArea.extent.height = vulkan_state.swapchain_extent.height;
+    post_rendering_info.layerCount = 1;
+    post_rendering_info.viewMask = 0;
+    post_rendering_info.colorAttachmentCount = 1;
+    post_rendering_info.pColorAttachments = &post_color_attachment;
+    vkCmdBeginRendering_fn(vulkan_state.command_buffer, &post_rendering_info);
 
     /* Viewport & scissor for screen — use swapchain_extent (always valid) */
     VkViewport post_vp = {0};
@@ -3513,8 +3336,29 @@ void render_frame_end(void) {
     running_stats.num_tris += 2;
     running_stats.num_draw_calls++;
 
-    /* End post render pass */
-    vkCmdEndRenderPass_fn(vulkan_state.command_buffer);
+    /* End post rendering, then explicitly transition the swapchain image
+     * to PRESENT_SRC_KHR. Dynamic rendering leaves the image in the layout
+     * declared at BeginRendering (COLOR_ATTACHMENT_OPTIMAL), and the
+     * presentation engine requires PRESENT_SRC_KHR. srcStage must be
+     * COLOR_ATTACHMENT_OUTPUT to order the rasterization color writes. */
+    vkCmdEndRendering_fn(vulkan_state.command_buffer);
+
+    VkImageMemoryBarrier present_barrier = {0};
+    present_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    present_barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    present_barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    present_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    present_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    present_barrier.image = vulkan_state.swapchain_images[vulkan_state.current_swapchain_image];
+    present_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    present_barrier.subresourceRange.levelCount = 1;
+    present_barrier.subresourceRange.layerCount = 1;
+    present_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    present_barrier.dstAccessMask = 0;
+    vkCmdPipelineBarrier_fn(vulkan_state.command_buffer,
+                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            0, 0, NULL, 0, NULL, 1, &present_barrier);
     /* End command buffer recording */
     vkEndCommandBuffer_fn(vulkan_state.command_buffer);
     /* Submit to queue:
