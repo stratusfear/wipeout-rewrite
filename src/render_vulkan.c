@@ -3566,11 +3566,14 @@ void render_flush(void) {
      * glPolygonOffset(-32, 1), so factor=-32 scales the slope, pushing the
      * shadow in front of the track (toward the camera) proportional to its
      * depth slope; a positive offset would push it behind the track and fail
-     * the LESS depth test. depthBiasClamp=1.0 mirrors GL's [0,1] depth range.
+     * the LESS depth test. depthBiasClamp=0.0 means "no clamping" (the spec's
+     * dbclamp is the identity when clamp==0), matching GL's unclamped
+     * glPolygonOffset; a nonzero clamp would require the depthBiasClamp
+     * feature and only bound the bias from above (clamp>0) or below.
      * bias==0 mirrors glDisable(GL_POLYGON_OFFSET_FILL) (both terms zero). */
     vkCmdSetDepthBias_fn(vulkan_state.command_buffer,
                         vulkan_state.current_depth_bias != 0.0f ? 1.0f : 0.0f,
-                        1.0f,
+                        0.0f,
                         vulkan_state.current_depth_bias);
     /* The game pass renders into the backbuffer, which is vertically flipped
      * relative to the final (presented) image. The projection matrices are
