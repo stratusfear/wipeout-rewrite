@@ -3145,13 +3145,33 @@ void render_frame_prepare(void) {
                              vulkan_state.image_acquired_semaphores[f],
                              VK_NULL_HANDLE,
                              &vulkan_state.current_swapchain_image);
-    if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR || acquire_result == VK_SUBOPTIMAL_KHR) {
+    if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
+        /* No image was acquired. The surface changed (resized, recomposited),
+         * so recreate the swapchain at the top of the next prepare; the screen
+         * size may have changed too, so recreate the backbuffer as well.
+         * command_buffer is still NULL here, so skipping this frame is safe
+         * (render_frame_end's guard drops it). */
+        vulkan_state.swapchain_recreate_pending = true;
+        vulkan_state.backbuffer_recreate_pending = true;
         return;
-    }
-    if (acquire_result == VK_TIMEOUT || acquire_result == VK_NOT_READY) {
+    } else if (acquire_result == VK_SUBOPTIMAL_KHR) {
+        /* SUBOPTIMAL is a SUCCESS code: an image HAS been acquired and the
+         * acquire semaphore is signaled, so render this frame normally. The
+         * surface is no longer optimal (e.g. display scale changed), so flag
+         * the swapchain for recreation before the next frame. */
+        vulkan_state.swapchain_recreate_pending = true;
+    } else if (acquire_result == VK_TIMEOUT || acquire_result == VK_NOT_READY) {
         /* No image available within the timeout (e.g. window minimized and
          * the presentation engine stopped releasing images). Skip this
          * frame and retry next frame — never block indefinitely. */
+        return;
+    } else if (acquire_result == VK_ERROR_SURFACE_LOST_KHR ||
+               acquire_result == VK_ERROR_DEVICE_LOST) {
+        /* The surface or the device is gone; redrawing cannot recover. Log
+         * loudly and stop rendering this frame rather than silently looping
+         * on a dead surface. */
+        fprintf(stderr, "Vulkan: fatal acquire error (%d); renderer stopping\n",
+                (int)acquire_result);
         return;
     }
 
@@ -3497,7 +3517,17 @@ void render_frame_end(void) {
     VkResult present_result = vkQueuePresentKHR_fn(vulkan_state.graphics_queue, &present_info);
 
     if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
-        /* Swapchain needs recreation */
+        /* The surface is out of date or no longer optimal; recreate the
+         * swapchain (and backbuffer, since the size may have changed) at the
+         * top of the next prepare. */
+        vulkan_state.swapchain_recreate_pending = true;
+        vulkan_state.backbuffer_recreate_pending = true;
+    } else if (present_result == VK_ERROR_SURFACE_LOST_KHR ||
+               present_result == VK_ERROR_DEVICE_LOST) {
+        /* The surface or the device is gone; redrawing cannot recover. Log
+         * loudly rather than silently looping on a dead surface. */
+        fprintf(stderr, "Vulkan: fatal present error (%d); renderer stopping\n",
+                (int)present_result);
     } else if (present_result != VK_SUCCESS) {
         fprintf(stderr, "vkQueuePresentKHR failed: %d\n", present_result);
     }
