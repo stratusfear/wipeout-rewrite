@@ -91,6 +91,9 @@ static PFN_vkCmdSetScissor                          vkCmdSetScissor_fn;
 static PFN_vkCmdBindVertexBuffers                   vkCmdBindVertexBuffers_fn;
 static PFN_vkCmdDraw                                vkCmdDraw_fn;
 static PFN_vkCmdSetDepthBias                        vkCmdSetDepthBias_fn;
+static PFN_vkCmdSetDepthTestEnable                  vkCmdSetDepthTestEnable_fn;
+static PFN_vkCmdSetDepthWriteEnable                 vkCmdSetDepthWriteEnable_fn;
+static PFN_vkCmdSetCullMode                         vkCmdSetCullMode_fn;
 static PFN_vkCmdBindDescriptorSets                    vkCmdBindDescriptorSets_fn;
 static PFN_vkCmdPushConstants                         vkCmdPushConstants_fn;
 static PFN_vkCmdBeginRendering                      vkCmdBeginRendering_fn;
@@ -218,6 +221,12 @@ static bool load_device_functions(VkDevice device, VkInstance instance) {
     if (!vkCmdDraw_fn) { fprintf(stderr, "Failed to load vkCmdDraw\n"); return false; }
     vkCmdSetDepthBias_fn = (PFN_vkCmdSetDepthBias)load_device_fn(device, instance, "vkCmdSetDepthBias");
     if (!vkCmdSetDepthBias_fn) { fprintf(stderr, "Failed to load vkCmdSetDepthBias\n"); return false; }
+    vkCmdSetDepthTestEnable_fn = (PFN_vkCmdSetDepthTestEnable)load_device_fn(device, instance, "vkCmdSetDepthTestEnable");
+    if (!vkCmdSetDepthTestEnable_fn) { fprintf(stderr, "Failed to load vkCmdSetDepthTestEnable\n"); return false; }
+    vkCmdSetDepthWriteEnable_fn = (PFN_vkCmdSetDepthWriteEnable)load_device_fn(device, instance, "vkCmdSetDepthWriteEnable");
+    if (!vkCmdSetDepthWriteEnable_fn) { fprintf(stderr, "Failed to load vkCmdSetDepthWriteEnable\n"); return false; }
+    vkCmdSetCullMode_fn = (PFN_vkCmdSetCullMode)load_device_fn(device, instance, "vkCmdSetCullMode");
+    if (!vkCmdSetCullMode_fn) { fprintf(stderr, "Failed to load vkCmdSetCullMode\n"); return false; }
     vkCmdBindDescriptorSets_fn = (PFN_vkCmdBindDescriptorSets)load_device_fn(device, instance, "vkCmdBindDescriptorSets");
     if (!vkCmdBindDescriptorSets_fn) { fprintf(stderr, "Failed to load vkCmdBindDescriptorSets\n"); return false; }
     vkCmdPushConstants_fn = (PFN_vkCmdPushConstants)load_device_fn(device, instance, "vkCmdPushConstants");
@@ -435,17 +444,12 @@ static struct vulkan_state {
 
     /* Pipeline state */
     VkPipelineLayout pipeline_layout;
-    /* Game-pass pipelines: one variant per (blend mode) x (depth test, depth
-     * write, cull backface) combo. Depth test/write, cull mode and front face
-     * are static pipeline state (one variant per distinct combo, selected in
-     * render_flush) because the matching vkCmdSet* dynamic-state commands
-     * have NULL dispatch entries under the Khronos validation layer: VVL's
-     * GDDPA returns NULL for them and the loader stores that NULL with no
-     * driver fall-through, so the trampoline tail-jumps into a NULL slot.
-     * Front face is always CLOCKWISE in the game pass (see render_flush), so
-     * it is not a combo dimension. Combo bits: 4 = depth test, 2 = depth
-     * write, 1 = cull backface. */
-    VkPipeline game_pipelines[2][8]; /* [blend_mode][combo] */
+    /* Game-pass pipelines: one per blend mode. Depth test/write and cull mode
+     * are dynamic state (extendedDynamicState, Vulkan 1.3 core) — issued
+     * per-flush via vkCmdSet* after the pipeline bind in render_flush. Front
+     * face is always CLOCKWISE in the game pass (see render_flush), so it is
+     * not a dimension at all. */
+    VkPipeline game_pipelines[2]; /* [blend_mode] */
     VkPipeline post_pipelines[NUM_RENDER_POST_EFFECTS];
     render_post_effect_t current_post_effect;
 
@@ -505,6 +509,14 @@ static struct vulkan_state {
     bool current_depth_write;
     float current_depth_bias;
     bool current_cull_backface;
+    /* Last EDS values issued to the GPU for the in-flight command buffer.
+     * Dynamic state is per-command-buffer and resets when the CB is re-begun
+     * in render_frame_prepare, so dyn_state_issued is reset there and the
+     * first game-pipeline bind of each frame re-issues all three. */
+    bool dyn_state_issued;
+    bool dyn_depth_test;
+    bool dyn_depth_write;
+    bool dyn_cull_backface;
     bool current_is_3d;
     vec2_t current_screen_position;
 
@@ -769,6 +781,9 @@ void render_init(vec2i_t screen_size) {
     LOAD_FN_INSTANCE(vkCmdSetScissor_fn, vkCmdSetScissor)
     LOAD_FN_INSTANCE(vkCmdBindVertexBuffers_fn, vkCmdBindVertexBuffers)
     LOAD_FN_INSTANCE(vkCmdDraw_fn, vkCmdDraw)
+    LOAD_FN_INSTANCE(vkCmdSetDepthTestEnable_fn, vkCmdSetDepthTestEnable)
+    LOAD_FN_INSTANCE(vkCmdSetDepthWriteEnable_fn, vkCmdSetDepthWriteEnable)
+    LOAD_FN_INSTANCE(vkCmdSetCullMode_fn, vkCmdSetCullMode)
     LOAD_FN_INSTANCE(vkCmdBindDescriptorSets_fn, vkCmdBindDescriptorSets)
     LOAD_FN_INSTANCE(vkCmdPushConstants_fn, vkCmdPushConstants)
     LOAD_FN_INSTANCE(vkCmdBeginRendering_fn, vkCmdBeginRendering)
@@ -997,11 +1012,10 @@ void render_init(vec2i_t screen_size) {
     feat_eds2.extendedDynamicState2 = VK_TRUE;
     feat_dyn_render.dynamicRendering = VK_TRUE;
 
-    /* The game-pass pipelines only use core 1.0 dynamic states (viewport,
-     * scissor, depth bias); depth test/write, cull mode and front face are
-     * static pipeline state (one variant per combo — see game_pipelines).
-     * The extended dynamic state features above are enabled up front for
-     * the later modernization steps; no device extension is needed. */
+    /* The game-pass pipelines use core 1.0 dynamic states (viewport, scissor,
+     * depth bias) plus the extended dynamic states depth test/write enable
+     * and cull mode (see game_pipelines / render_flush); front face stays
+     * static CLOCKWISE. No device extension is needed for any of it. */
     const char *device_exts[1] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
     VkDeviceCreateInfo device_ci = {0};
@@ -2627,19 +2641,17 @@ static VkPipeline create_post_pipeline(VkShaderModule vert, const char *frag_spv
 /* Pipeline creation                                                   */
 /* ------------------------------------------------------------------ */
 
-/* Create one game-pass pipeline variant. Depth test/write, cull mode and
- * front face are baked into static pipeline state because the matching
- * vkCmdSet* dynamic-state commands have NULL dispatch entries under the
- * Khronos validation layer (see game_pipelines); one variant is created
- * per distinct combo and render_flush selects it from the CPU-tracked
- * state. Front face is always CLOCKWISE in the game pass: the backbuffer
- * is vertically flipped relative to the presented image, which reverses
- * triangle winding, so VK_CULL_MODE_BACK_BIT culls true back-faces
- * (mirrors GL glFrontFace(GL_CCW) + glCullFace(GL_BACK)). Depth bias stays
- * dynamic (vkCmdSetDepthBias works under the validation layer). */
+/* Create one game-pass pipeline (one per blend mode). Depth test/write and
+ * cull mode are dynamic state (extendedDynamicState, Vulkan 1.3 core), so
+ * the static values below are ignored and render_flush issues vkCmdSet*
+ * after the bind; only front face and depth compare op stay static. Front
+ * face is always CLOCKWISE in the game pass: the backbuffer is vertically
+ * flipped relative to the presented image, which reverses triangle winding,
+ * so VK_CULL_MODE_BACK_BIT culls true back-faces (mirrors GL
+ * glFrontFace(GL_CCW) + glCullFace(GL_BACK)). Depth bias stays dynamic too
+ * (vkCmdSetDepthBias). */
 static VkPipeline create_game_pipeline(VkShaderModule vert, VkShaderModule frag,
-                                       bool alpha_blend, bool depth_test,
-                                       bool depth_write, bool cull_backface) {
+                                       bool alpha_blend) {
     VkPipelineShaderStageCreateInfo stages[2] = {0};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -2703,7 +2715,8 @@ static VkPipeline create_game_pipeline(VkShaderModule vert, VkShaderModule frag,
     rast.depthClampEnable = VK_FALSE;
     rast.rasterizerDiscardEnable = VK_FALSE;
     rast.polygonMode = VK_POLYGON_MODE_FILL;
-    rast.cullMode = cull_backface ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
+    /* Dynamic (see below) — the static value is ignored, keep it valid. */
+    rast.cullMode = VK_CULL_MODE_NONE;
     rast.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rast.depthBiasEnable = VK_TRUE;
     rast.lineWidth = 1.0f;
@@ -2736,21 +2749,26 @@ static VkPipeline create_game_pipeline(VkShaderModule vert, VkShaderModule frag,
     cb.attachmentCount = 1;
     cb.pAttachments = &color_att;
 
-    /* Core 1.0 dynamic states only. Depth test/write, cull mode and front
-     * face are static per variant (see above). */
+    /* Core 1.0 dynamic states plus the extended dynamic states for depth
+     * test/write and cull mode (extendedDynamicState, Vulkan 1.3 core).
+     * Front face stays static CLOCKWISE (see above). */
     VkPipelineDynamicStateCreateInfo dyn = {0};
     dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dyn.dynamicStateCount = 3;
+    dyn.dynamicStateCount = 6;
     dyn.pDynamicStates = (VkDynamicState[]){
         VK_DYNAMIC_STATE_VIEWPORT,
         VK_DYNAMIC_STATE_SCISSOR,
         VK_DYNAMIC_STATE_DEPTH_BIAS,
+        VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE,
+        VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
+        VK_DYNAMIC_STATE_CULL_MODE,
     };
 
     VkPipelineDepthStencilStateCreateInfo ds = {0};
     ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    ds.depthTestEnable = depth_test ? VK_TRUE : VK_FALSE;
-    ds.depthWriteEnable = depth_write ? VK_TRUE : VK_FALSE;
+    /* Dynamic (see above) — the static values are ignored, keep them valid. */
+    ds.depthTestEnable = VK_FALSE;
+    ds.depthWriteEnable = VK_FALSE;
     ds.depthCompareOp = VK_COMPARE_OP_LESS;
     ds.depthBoundsTestEnable = VK_FALSE;
     ds.stencilTestEnable = VK_FALSE;
@@ -2820,11 +2838,9 @@ static bool create_pipelines(void) {
         return false;
     }
 
-    /* --- Game pipelines: one variant per (depth test, depth write, cull
-     * backface) combo, per blend mode. The combo state is static pipeline
-     * state (see game_pipelines); render_flush selects the variant from the
-     * CPU-tracked state. Combo bits: 4 = depth test, 2 = depth write,
-     * 1 = cull backface. --- */
+    /* --- Game pipelines: one per blend mode. Depth test/write and cull mode
+     * are dynamic state (see game_pipelines); render_flush issues the
+     * matching vkCmdSet* after each bind. --- */
     {
         VkShaderModule vert = load_shader_module("shaders/normal.vert.spvasrc.spv");
         VkShaderModule frag = load_shader_module("shaders/normal.frag.spvasrc.spv");
@@ -2834,19 +2850,13 @@ static bool create_pipelines(void) {
             vkDestroyShaderModule_fn(vulkan_state.device, frag, NULL);
             return false;
         }
-        bool ok = true;
-        for (int combo = 0; combo < 8; combo++) {
-            vulkan_state.game_pipelines[RENDER_BLEND_NORMAL][combo] = create_game_pipeline(
-                vert, frag, true, (combo & 4) != 0, (combo & 2) != 0, (combo & 1) != 0);
-            if (vulkan_state.game_pipelines[RENDER_BLEND_NORMAL][combo] == VK_NULL_HANDLE) {
-                fprintf(stderr, "Failed to create normal pipeline variant %d\n", combo);
-                ok = false;
-                break;
-            }
-        }
+        vulkan_state.game_pipelines[RENDER_BLEND_NORMAL] = create_game_pipeline(vert, frag, true);
         vkDestroyShaderModule_fn(vulkan_state.device, vert, NULL);
         vkDestroyShaderModule_fn(vulkan_state.device, frag, NULL);
-        if (!ok) return false;
+        if (vulkan_state.game_pipelines[RENDER_BLEND_NORMAL] == VK_NULL_HANDLE) {
+            fprintf(stderr, "Failed to create normal pipeline\n");
+            return false;
+        }
     }
 
     {
@@ -2858,19 +2868,13 @@ static bool create_pipelines(void) {
             vkDestroyShaderModule_fn(vulkan_state.device, frag, NULL);
             return false;
         }
-        bool ok = true;
-        for (int combo = 0; combo < 8; combo++) {
-            vulkan_state.game_pipelines[RENDER_BLEND_LIGHTER][combo] = create_game_pipeline(
-                vert, frag, false, (combo & 4) != 0, (combo & 2) != 0, (combo & 1) != 0);
-            if (vulkan_state.game_pipelines[RENDER_BLEND_LIGHTER][combo] == VK_NULL_HANDLE) {
-                fprintf(stderr, "Failed to create lighter pipeline variant %d\n", combo);
-                ok = false;
-                break;
-            }
-        }
+        vulkan_state.game_pipelines[RENDER_BLEND_LIGHTER] = create_game_pipeline(vert, frag, false);
         vkDestroyShaderModule_fn(vulkan_state.device, vert, NULL);
         vkDestroyShaderModule_fn(vulkan_state.device, frag, NULL);
-        if (!ok) return false;
+        if (vulkan_state.game_pipelines[RENDER_BLEND_LIGHTER] == VK_NULL_HANDLE) {
+            fprintf(stderr, "Failed to create lighter pipeline\n");
+            return false;
+        }
     }
 
     /* --- Post pipelines (fullscreen quad, no depth, no blend).
@@ -2897,7 +2901,7 @@ static bool create_pipelines(void) {
         vkDestroyShaderModule_fn(vulkan_state.device, vert, NULL);
     }
 
-    printf("Vulkan: 18 pipelines created (2 game blend modes x 8 depth/cull variants, 2 post)\n");
+    printf("Vulkan: 4 pipelines created (2 game blend modes, 2 post)\n");
 
     return true;
 }
@@ -2908,11 +2912,9 @@ static void destroy_pipelines(void) {
         vulkan_state.pipeline_layout = VK_NULL_HANDLE;
     }
     for (int b = 0; b < 2; b++) {
-        for (int combo = 0; combo < 8; combo++) {
-            if (vulkan_state.game_pipelines[b][combo] != VK_NULL_HANDLE) {
-                vkDestroyPipeline_fn(vulkan_state.device, vulkan_state.game_pipelines[b][combo], NULL);
-                vulkan_state.game_pipelines[b][combo] = VK_NULL_HANDLE;
-            }
+        if (vulkan_state.game_pipelines[b] != VK_NULL_HANDLE) {
+            vkDestroyPipeline_fn(vulkan_state.device, vulkan_state.game_pipelines[b], NULL);
+            vulkan_state.game_pipelines[b] = VK_NULL_HANDLE;
         }
     }
     for (int i = 0; i < NUM_RENDER_POST_EFFECTS; i++) {
@@ -3113,6 +3115,11 @@ void render_frame_prepare(void) {
     begin_ci.flags = 0;
     VkResult begin_result = vkBeginCommandBuffer_fn(vulkan_state.command_buffer, &begin_ci);
     (void)begin_result;
+
+    /* Re-beginning the command buffer invalidates its dynamic state, so the
+     * EDS values must be re-issued before the first game-pipeline draw of
+     * this frame (render_flush handles it via dyn_state_issued). */
+    vulkan_state.dyn_state_issued = false;
 
     /* Transition backbuffer from its actual previous layout to color attachment.
      * After game pass, backbuffer is in SHADER_READ_ONLY_OPTIMAL (render pass finalLayout).
@@ -3499,19 +3506,35 @@ void render_flush(void) {
     vkCmdBindVertexBuffers_fn(vulkan_state.command_buffer, 0, 1,
                               &vulkan_state.vertex_buffers[f], offsets);
 
-    /* Bind pipeline: blend mode selects the shader/blend variant; depth
-     * test, depth write and cull mode are static per pipeline variant (the
-     * matching vkCmdSet* dynamic-state commands have NULL dispatch entries
-     * under the Khronos validation layer — see game_pipelines), so the
-     * CPU-tracked state selects the variant. Front face is always CLOCKWISE
-     * (baked into every variant). Mirrors the GL reference's
+    /* Bind pipeline: blend mode selects the shader/blend variant. Depth
+     * test/write and cull mode are dynamic state (see game_pipelines) and
+     * are issued right after the bind. Front face is always CLOCKWISE
+     * (baked into both variants). Mirrors the GL reference's
      * glEnable/glDisable(GL_DEPTH_TEST), glDepthMask and
      * glEnable/glDisable(GL_CULL_FACE). */
-    int combo = (vulkan_state.current_depth_test ? 4 : 0) |
-                (vulkan_state.current_depth_write ? 2 : 0) |
-                (vulkan_state.current_cull_backface ? 1 : 0);
-    VkPipeline pipeline = vulkan_state.game_pipelines[vulkan_state.current_blend_mode][combo];
-    vkCmdBindPipeline_fn(vulkan_state.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdBindPipeline_fn(vulkan_state.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        vulkan_state.game_pipelines[vulkan_state.current_blend_mode]);
+    /* Extended dynamic state (Vulkan 1.3 core) is per-command-buffer: it
+     * resets when the CB is re-begun in render_frame_prepare, so
+     * dyn_state_issued is reset there and the first game-pipeline bind of
+     * each frame re-issues all three; within a frame, re-issue only when a
+     * value differs from what was last issued. */
+    if (!vulkan_state.dyn_state_issued ||
+        vulkan_state.dyn_depth_test != vulkan_state.current_depth_test ||
+        vulkan_state.dyn_depth_write != vulkan_state.current_depth_write ||
+        vulkan_state.dyn_cull_backface != vulkan_state.current_cull_backface) {
+        vkCmdSetDepthTestEnable_fn(vulkan_state.command_buffer,
+                                   vulkan_state.current_depth_test ? VK_TRUE : VK_FALSE);
+        vkCmdSetDepthWriteEnable_fn(vulkan_state.command_buffer,
+                                    vulkan_state.current_depth_write ? VK_TRUE : VK_FALSE);
+        vkCmdSetCullMode_fn(vulkan_state.command_buffer,
+                            vulkan_state.current_cull_backface ? VK_CULL_MODE_BACK_BIT
+                                                               : VK_CULL_MODE_NONE);
+        vulkan_state.dyn_depth_test = vulkan_state.current_depth_test;
+        vulkan_state.dyn_depth_write = vulkan_state.current_depth_write;
+        vulkan_state.dyn_cull_backface = vulkan_state.current_cull_backface;
+        vulkan_state.dyn_state_issued = true;
+    }
     /* GL glPolygonOffset(factor, units) -> Vulkan vkCmdSetDepthBias(constant,
      * clamp, slope):
      *   factor  -> depthBiasSlopeFactor    (scales the polygon max depth slope m)
