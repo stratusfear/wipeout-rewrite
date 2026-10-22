@@ -365,6 +365,11 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback_fn(
 
 #define MAX_FRAMES_IN_FLIGHT 2
 #define TEXTURES_MAX 1024
+/* Fixed-size per-swapchain-image arrays (render_complete_semaphores,
+ * swapchain_image_layouts). A driver may return more images than the
+ * requested minImageCount, so create_swapchain fails if the actual count
+ * exceeds this. */
+#define MAX_SWAPCHAIN_IMAGES 16
 
 typedef struct {
     vec2i_t offset;
@@ -411,7 +416,7 @@ static struct vulkan_state {
      *   prepare() CPU-waits on that value for backpressure. Initial value is
      *   0, so the first wait per slot is a no-op. */
     VkSemaphore image_acquired_semaphores[MAX_FRAMES_IN_FLIGHT]; /* One per frame slot */
-    VkSemaphore render_complete_semaphores[16]; /* One per swapchain image */
+    VkSemaphore render_complete_semaphores[MAX_SWAPCHAIN_IMAGES]; /* One per swapchain image */
     VkSemaphore timeline_semaphore; /* TIMELINE type, replaces frame fences */
     uint64_t timeline_next_value; /* Next value to signal on submit (monotonic) */
     uint64_t slot_fence_value[MAX_FRAMES_IN_FLIGHT]; /* Value each slot's last submit will signal */
@@ -486,7 +491,7 @@ static struct vulkan_state {
     VkSampler atlas_nearest_sampler;
     VkImageLayout atlas_layout; /* track atlas image layout for lazy transition */
     float max_anisotropy; /* hardware max sampler anisotropy (sampler field clamps at 16) */
-    VkImageLayout swapchain_image_layouts[16]; /* track each swapchain image layout */
+    VkImageLayout swapchain_image_layouts[MAX_SWAPCHAIN_IMAGES]; /* track each swapchain image layout */
     VkImageLayout backbuffer_layout; /* track backbuffer image layout across frames */
     VkImageLayout backbuffer_depth_layout; /* track backbuffer depth image layout across frames */
     #define ATLAS_SIZE 64
@@ -1079,7 +1084,7 @@ void render_init(vec2i_t screen_size) {
         }
 
         /* Per-swapchain-image render-complete semaphores (indexed by image) */
-        for (uint32_t i = 0; i < 16; i++) {
+        for (uint32_t i = 0; i < MAX_SWAPCHAIN_IMAGES; i++) {
             if (vkCreateSemaphore_fn(vulkan_state.device, &semaphore_ci, NULL,
                                      &vulkan_state.render_complete_semaphores[i]) != VK_SUCCESS) {
                 fprintf(stderr, "Failed to create render-complete semaphore\n");
@@ -1825,11 +1830,24 @@ static bool create_swapchain(VkSwapchainKHR old_swapchain) {
     vkGetSwapchainImagesKHR_fn(vulkan_state.device, vulkan_state.swapchain, &swapchain_image_count, NULL);
     vulkan_state.swapchain_image_count = swapchain_image_count;
 
+    /* A driver may return more images than the requested minImageCount. The
+     * per-image sync arrays are fixed at MAX_SWAPCHAIN_IMAGES, so fail with a
+     * clear error rather than index out of bounds. */
+    if (swapchain_image_count > MAX_SWAPCHAIN_IMAGES) {
+        fprintf(stderr, "Vulkan: swapchain returned %u images, exceeds the "
+                        "supported maximum of %d\n",
+                swapchain_image_count, MAX_SWAPCHAIN_IMAGES);
+        vkDestroySwapchainKHR_fn(vulkan_state.device, vulkan_state.swapchain, NULL);
+        vulkan_state.swapchain = VK_NULL_HANDLE;
+        vulkan_state.swapchain_image_count = 0;
+        return false;
+    }
+
     vulkan_state.swapchain_images = (VkImage *)calloc(swapchain_image_count, sizeof(VkImage));
     vkGetSwapchainImagesKHR_fn(vulkan_state.device, vulkan_state.swapchain, &swapchain_image_count, vulkan_state.swapchain_images);
 
     /* All swapchain images start in UNDEFINED after creation */
-    for (uint32_t i = 0; i < swapchain_image_count && i < 16; i++) {
+    for (uint32_t i = 0; i < swapchain_image_count && i < MAX_SWAPCHAIN_IMAGES; i++) {
         vulkan_state.swapchain_image_layouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
     }
 
