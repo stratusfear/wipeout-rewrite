@@ -44,6 +44,7 @@ static PFN_vkEnumeratePhysicalDevices               vkEnumeratePhysicalDevices_f
 static PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties_fn;
 static PFN_vkGetPhysicalDeviceProperties            vkGetPhysicalDeviceProperties_fn;
 static PFN_vkGetPhysicalDeviceFeatures               vkGetPhysicalDeviceFeatures_fn;
+static PFN_vkGetPhysicalDeviceFeatures2              vkGetPhysicalDeviceFeatures2_fn;
 static PFN_vkEnumerateDeviceExtensionProperties      vkEnumerateDeviceExtensionProperties_fn;
 static PFN_vkGetPhysicalDeviceSurfaceSupportKHR     vkGetPhysicalDeviceSurfaceSupportKHR_fn;
 static PFN_vkGetPhysicalDeviceSurfaceFormatsKHR     vkGetPhysicalDeviceSurfaceFormatsKHR_fn;
@@ -56,8 +57,8 @@ static PFN_vkGetDeviceQueue                         vkGetDeviceQueue_fn;
 static PFN_vkDestroySurfaceKHR                      vkDestroySurfaceKHR_fn;
 static PFN_vkGetDeviceProcAddr                      vkGetDeviceProcAddr_fn;
 
-static PFN_vkCreateDebugReportCallbackEXT           vkCreateDebugReportCallbackEXT_fn;
-static PFN_vkDestroyDebugReportCallbackEXT          vkDestroyDebugReportCallbackEXT_fn;
+static PFN_vkCreateDebugUtilsMessengerEXT           vkCreateDebugUtilsMessengerEXT_fn;
+static PFN_vkDestroyDebugUtilsMessengerEXT          vkDestroyDebugUtilsMessengerEXT_fn;
 
 /* Swapchain */
 static PFN_vkCreateSwapchainKHR                     vkCreateSwapchainKHR_fn;
@@ -339,7 +340,7 @@ static bool load_device_functions(VkDevice device, VkInstance instance) {
 /* Helpers                                                              */
 /* ------------------------------------------------------------------ */
 
-static VkDebugReportCallbackEXT debug_callback = VK_NULL_HANDLE;
+static VkDebugUtilsMessengerEXT debug_callback = VK_NULL_HANDLE;
 
 /* Forward declarations */
 static bool create_swapchain(VkSwapchainKHR old_swapchain);
@@ -361,20 +362,17 @@ static void render_flush(void);
 static uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t type_filter, VkMemoryPropertyFlags properties);
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback_fn(
-    VkDebugReportFlagsEXT flags,
-    VkDebugReportObjectTypeEXT objectType,
-    uint64_t object,
-    size_t location,
-    int32_t code,
-    const char *layerPrefix,
-    const char *msg,
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+    VkDebugUtilsMessageTypeFlagsEXT message_types,
+    const VkDebugUtilsMessengerCallbackDataEXT *callback_data,
     void *user_data
 ) {
-    (void)objectType; (void)object; (void)location; (void)code;
+    (void)message_types;
     (void)user_data;
-    const char *severity = flags & VK_DEBUG_REPORT_ERROR_BIT_EXT ? "ERROR" :
-                           flags & VK_DEBUG_REPORT_WARNING_BIT_EXT ? "WARN" : "INFO";
-    fprintf(stderr, "[VULKAN %s] %s: %s\n", severity, layerPrefix, msg);
+    const char *sev = severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT ? "ERROR" :
+                      severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT ? "WARN" : "INFO";
+    const char *prefix = callback_data->pMessageIdName ? callback_data->pMessageIdName : "";
+    fprintf(stderr, "[VULKAN %s] %s: %s\n", sev, prefix, callback_data->pMessage);
     return VK_FALSE;
 }
 
@@ -701,12 +699,16 @@ void render_init(vec2i_t screen_size) {
 
     memcpy(exts, sdl_exts, sdl_ext_count * sizeof(const char *));
 
-    VkDebugReportCallbackCreateInfoEXT debug_ci = {0};
+    VkDebugUtilsMessengerCreateInfoEXT debug_ci = {0};
     if (want_debug) {
-        exts[sdl_ext_count] = VK_EXT_DEBUG_REPORT_EXTENSION_NAME;
-        debug_ci.sType = VK_STRUCTURE_TYPE_DEBUG_REPORT_CREATE_INFO_EXT;
-        debug_ci.flags = VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_WARNING_BIT_EXT;
-        debug_ci.pfnCallback = debug_callback_fn;
+        exts[sdl_ext_count] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+        debug_ci.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+        debug_ci.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+                                   VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+        debug_ci.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                               VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                               VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        debug_ci.pfnUserCallback = debug_callback_fn;
     }
 
     VkInstanceCreateInfo instance_ci = {0};
@@ -717,7 +719,7 @@ void render_init(vec2i_t screen_size) {
 
     VkApplicationInfo app_info = {0};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app_info.apiVersion = VK_MAKE_VERSION(1, 2, 0);
+    app_info.apiVersion = VK_MAKE_VERSION(1, 3, 0);
     app_info.pApplicationName = "wipeout-rewrite";
     app_info.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
     app_info.pEngineName = "wipeout-rewrite";
@@ -729,7 +731,7 @@ void render_init(vec2i_t screen_size) {
     free(exts);
 
     if (result != VK_SUCCESS) {
-        fprintf(stderr, "vkCreateInstance failed: %d\n", result);
+        fprintf(stderr, "vkCreateInstance failed: %d (Vulkan 1.3 required)\n", result);
         return;
     }
 
@@ -739,6 +741,7 @@ void render_init(vec2i_t screen_size) {
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceQueueFamilyProperties_fn, vkGetPhysicalDeviceQueueFamilyProperties)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceProperties_fn, vkGetPhysicalDeviceProperties)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceFeatures_fn, vkGetPhysicalDeviceFeatures)
+    LOAD_FN_INSTANCE(vkGetPhysicalDeviceFeatures2_fn, vkGetPhysicalDeviceFeatures2)
     LOAD_FN_INSTANCE(vkEnumerateDeviceExtensionProperties_fn, vkEnumerateDeviceExtensionProperties)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceSurfaceSupportKHR_fn, vkGetPhysicalDeviceSurfaceSupportKHR)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceSurfaceFormatsKHR_fn, vkGetPhysicalDeviceSurfaceFormatsKHR)
@@ -750,9 +753,16 @@ void render_init(vec2i_t screen_size) {
     LOAD_FN_INSTANCE(vkGetDeviceQueue_fn, vkGetDeviceQueue)
     LOAD_FN_INSTANCE(vkDestroySurfaceKHR_fn, vkDestroySurfaceKHR)
     LOAD_FN_INSTANCE(vkGetDeviceProcAddr_fn, vkGetDeviceProcAddr)
-    /* Debug report callbacks are optional extension functions */
-    vkCreateDebugReportCallbackEXT_fn = (PFN_vkCreateDebugReportCallbackEXT)vk_get_proc("vkCreateDebugReportCallbackEXT", vulkan_state.instance);
-    vkDestroyDebugReportCallbackEXT_fn = (PFN_vkDestroyDebugReportCallbackEXT)vk_get_proc("vkDestroyDebugReportCallbackEXT", vulkan_state.instance);
+    /* Debug utils messenger is an optional extension function */
+    vkCreateDebugUtilsMessengerEXT_fn = (PFN_vkCreateDebugUtilsMessengerEXT)vk_get_proc("vkCreateDebugUtilsMessengerEXT", vulkan_state.instance);
+    vkDestroyDebugUtilsMessengerEXT_fn = (PFN_vkDestroyDebugUtilsMessengerEXT)vk_get_proc("vkDestroyDebugUtilsMessengerEXT", vulkan_state.instance);
+    if (want_debug && vkCreateDebugUtilsMessengerEXT_fn) {
+        VkResult cb_result = vkCreateDebugUtilsMessengerEXT_fn(vulkan_state.instance, &debug_ci, NULL, &debug_callback);
+        if (cb_result != VK_SUCCESS) {
+            fprintf(stderr, "vkCreateDebugUtilsMessengerEXT failed: %d\n", cb_result);
+            debug_callback = VK_NULL_HANDLE;
+        }
+    }
     /* Device functions also loadable via instance — overwritten by load_device_functions */
     LOAD_FN_INSTANCE(vkCreateSwapchainKHR_fn, vkCreateSwapchainKHR)
     LOAD_FN_INSTANCE(vkDestroySwapchainKHR_fn, vkDestroySwapchainKHR)
@@ -963,10 +973,59 @@ void render_init(vec2i_t screen_size) {
     VkPhysicalDeviceFeatures device_features = {0};
     vkGetPhysicalDeviceFeatures_fn(vulkan_state.physical_device, &device_features);
 
+    /* Vulkan 1.3 features, enabled up front so the later modernization
+     * steps (timeline semaphores, synchronization2, extended dynamic
+     * state) can use them without another device-creation change. All
+     * four are mandatory on any conformant 1.3 implementation; query
+     * first and fail with a named error if the driver lies about its
+     * version. Note the EDS feature structs keep their EXT names/sTypes
+     * even in 1.3 — only the commands and VkDynamicState values were
+     * promoted to core. */
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT feat_eds2 = {0};
+    feat_eds2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT;
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT feat_eds = {0};
+    feat_eds.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT;
+    feat_eds.pNext = &feat_eds2;
+    VkPhysicalDeviceSynchronization2Features feat_sync2 = {0};
+    feat_sync2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+    feat_sync2.pNext = &feat_eds;
+    VkPhysicalDeviceTimelineSemaphoreFeatures feat_timeline = {0};
+    feat_timeline.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
+    feat_timeline.pNext = &feat_sync2;
+
+    VkPhysicalDeviceFeatures2 features2 = {0};
+    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2.pNext = &feat_timeline;
+    vkGetPhysicalDeviceFeatures2_fn(vulkan_state.physical_device, &features2);
+
+    if (!feat_timeline.timelineSemaphore) {
+        fprintf(stderr, "Vulkan 1.3 driver missing required feature: timelineSemaphore\n");
+        goto cleanup;
+    }
+    if (!feat_sync2.synchronization2) {
+        fprintf(stderr, "Vulkan 1.3 driver missing required feature: synchronization2\n");
+        goto cleanup;
+    }
+    if (!feat_eds.extendedDynamicState) {
+        fprintf(stderr, "Vulkan 1.3 driver missing required feature: extendedDynamicState\n");
+        goto cleanup;
+    }
+    if (!feat_eds2.extendedDynamicState2) {
+        fprintf(stderr, "Vulkan 1.3 driver missing required feature: extendedDynamicState2\n");
+        goto cleanup;
+    }
+
+    /* All four are guaranteed supported by the checks above — enable them. */
+    feat_timeline.timelineSemaphore = VK_TRUE;
+    feat_sync2.synchronization2 = VK_TRUE;
+    feat_eds.extendedDynamicState = VK_TRUE;
+    feat_eds2.extendedDynamicState2 = VK_TRUE;
+
     /* The game-pass pipelines only use core 1.0 dynamic states (viewport,
      * scissor, depth bias); depth test/write, cull mode and front face are
-     * static pipeline state (one variant per combo — see game_pipelines),
-     * so no device extension is needed for dynamic state. */
+     * static pipeline state (one variant per combo — see game_pipelines).
+     * The extended dynamic state features above are enabled up front for
+     * the later modernization steps; no device extension is needed. */
     const char *device_exts[1] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
     VkDeviceCreateInfo device_ci = {0};
@@ -974,7 +1033,7 @@ void render_init(vec2i_t screen_size) {
     device_ci.queueCreateInfoCount = 1;
     device_ci.pQueueCreateInfos = &queue_ci;
     device_ci.pEnabledFeatures = &device_features;
-    device_ci.pNext = NULL;
+    device_ci.pNext = &feat_timeline;
     device_ci.enabledExtensionCount = 1;
     device_ci.ppEnabledExtensionNames = device_exts;
     device_ci.enabledLayerCount = 0;
@@ -1454,7 +1513,7 @@ void render_cleanup(void) {
         }
         if (vulkan_state.instance) {
             if (debug_callback) {
-                vkDestroyDebugReportCallbackEXT_fn(vulkan_state.instance, debug_callback, NULL);
+                vkDestroyDebugUtilsMessengerEXT_fn(vulkan_state.instance, debug_callback, NULL);
                 debug_callback = VK_NULL_HANDLE;
             }
             vkDestroyInstance_fn(vulkan_state.instance, NULL);
@@ -1621,7 +1680,7 @@ void render_cleanup(void) {
     }
     if (vulkan_state.instance) {
         if (debug_callback) {
-            vkDestroyDebugReportCallbackEXT_fn(vulkan_state.instance, debug_callback, NULL);
+            vkDestroyDebugUtilsMessengerEXT_fn(vulkan_state.instance, debug_callback, NULL);
             debug_callback = VK_NULL_HANDLE;
         }
         vkDestroyInstance_fn(vulkan_state.instance, NULL);
