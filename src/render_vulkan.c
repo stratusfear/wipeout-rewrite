@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dlfcn.h>
+#include <unistd.h>
 #include <SDL.h>
 #include <vulkan/vulkan.h>
 #include <SDL_vulkan.h>
@@ -377,10 +377,9 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback_fn(
 
 #define MAX_FRAMES_IN_FLIGHT 2
 #define TEXTURES_MAX 1024
-/* Fixed-size per-swapchain-image arrays (render_complete_semaphores,
- * swapchain_image_layouts). A driver may return more images than the
- * requested minImageCount, so create_swapchain fails if the actual count
- * exceeds this. */
+/* Fixed-size per-swapchain-image arrays (render_complete_semaphores). A
+ * driver may return more images than the requested minImageCount, so
+ * create_swapchain fails if the actual count exceeds this. */
 #define MAX_SWAPCHAIN_IMAGES 16
 
 typedef struct {
@@ -493,7 +492,6 @@ static struct vulkan_state {
     /* Persistent one-shot command pool for texture uploads (avoids per-upload pool churn) */
     VkCommandPool upload_command_pool;
     VkCommandBuffer upload_command_buffer;
-    bool upload_cb_initialized;
 
     /* Texture atlas */
     VkImage atlas_image;
@@ -503,7 +501,6 @@ static struct vulkan_state {
     VkSampler atlas_nearest_sampler;
     VkImageLayout atlas_layout; /* track atlas image layout for lazy transition */
     float max_anisotropy; /* hardware max sampler anisotropy (sampler field clamps at 16) */
-    VkImageLayout swapchain_image_layouts[MAX_SWAPCHAIN_IMAGES]; /* track each swapchain image layout */
     VkImageLayout backbuffer_layout; /* track backbuffer image layout across frames */
     VkImageLayout backbuffer_depth_layout; /* track backbuffer depth image layout across frames */
     #define ATLAS_SIZE 64
@@ -659,20 +656,11 @@ uint16_t RENDER_NO_TEXTURE;
 void render_init(vec2i_t screen_size) {
     vulkan_state.screen_size = screen_size;
 
-    /* Load Vulkan entry point. SDL_Vulkan_GetVkGetInstanceProcAddr is a
-     * convenience wrapper that is not guaranteed to return a valid pointer
-     * in all configurations. Fall back to the spec-recommended path:
-     * dlopen("libvulkan.so") + dlsym("vkGetInstanceProcAddr"). */
+    /* Load Vulkan entry point from SDL, which is linked against the same
+     * libvulkan as the rest of the process. */
     vk_global_get_proc_addr = SDL_Vulkan_GetVkGetInstanceProcAddr();
     if (vk_global_get_proc_addr == NULL) {
-        /* Fallback: load vkGetInstanceProcAddr directly from libvulkan */
-        void *vulkan_handle = dlopen("libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
-        if (vulkan_handle) {
-            vk_global_get_proc_addr = (PFN_vkGetInstanceProcAddr)dlsym(vulkan_handle, "vkGetInstanceProcAddr");
-        }
-        if (vk_global_get_proc_addr == NULL) {
-            die("Failed to get vkGetInstanceProcAddr (SDL: %s)", SDL_GetError());
-        }
+        die("Failed to get vkGetInstanceProcAddr (SDL: %s)", SDL_GetError());
     }
 
     /* -- Phase 1: Load global functions (resolvable with NULL instance) -- */
@@ -769,92 +757,12 @@ void render_init(vec2i_t screen_size) {
             debug_callback = VK_NULL_HANDLE;
         }
     }
-    /* Device functions also loadable via instance — overwritten by load_device_functions */
+    /* Swapchain extension functions (not covered by load_device_functions) */
     LOAD_FN_INSTANCE(vkCreateSwapchainKHR_fn, vkCreateSwapchainKHR)
     LOAD_FN_INSTANCE(vkDestroySwapchainKHR_fn, vkDestroySwapchainKHR)
     LOAD_FN_INSTANCE(vkGetSwapchainImagesKHR_fn, vkGetSwapchainImagesKHR)
     LOAD_FN_INSTANCE(vkAcquireNextImageKHR_fn, vkAcquireNextImageKHR)
     LOAD_FN_INSTANCE(vkQueuePresentKHR_fn, vkQueuePresentKHR)
-
-    /* Image views */
-    LOAD_FN_INSTANCE(vkCreateImageView_fn, vkCreateImageView)
-    LOAD_FN_INSTANCE(vkDestroyImageView_fn, vkDestroyImageView)
-
-    /* Sync objects */
-    LOAD_FN_INSTANCE(vkCreateSemaphore_fn, vkCreateSemaphore)
-    LOAD_FN_INSTANCE(vkDestroySemaphore_fn, vkDestroySemaphore)
-    LOAD_FN_INSTANCE(vkCreateFence_fn, vkCreateFence)
-    LOAD_FN_INSTANCE(vkDestroyFence_fn, vkDestroyFence)
-    LOAD_FN_INSTANCE(vkWaitForFences_fn, vkWaitForFences)
-    LOAD_FN_INSTANCE(vkWaitSemaphores_fn, vkWaitSemaphores)
-
-    /* Command buffer */
-    LOAD_FN_INSTANCE(vkCreateCommandPool_fn, vkCreateCommandPool)
-    LOAD_FN_INSTANCE(vkDestroyCommandPool_fn, vkDestroyCommandPool)
-    LOAD_FN_INSTANCE(vkAllocateCommandBuffers_fn, vkAllocateCommandBuffers)
-    LOAD_FN_INSTANCE(vkResetCommandBuffer_fn, vkResetCommandBuffer)
-    LOAD_FN_INSTANCE(vkResetCommandPool_fn, vkResetCommandPool)
-    LOAD_FN_INSTANCE(vkCmdBindPipeline_fn, vkCmdBindPipeline)
-    LOAD_FN_INSTANCE(vkCmdSetViewport_fn, vkCmdSetViewport)
-    LOAD_FN_INSTANCE(vkCmdSetScissor_fn, vkCmdSetScissor)
-    LOAD_FN_INSTANCE(vkCmdBindVertexBuffers_fn, vkCmdBindVertexBuffers)
-    LOAD_FN_INSTANCE(vkCmdDraw_fn, vkCmdDraw)
-    LOAD_FN_INSTANCE(vkCmdSetDepthTestEnable_fn, vkCmdSetDepthTestEnable)
-    LOAD_FN_INSTANCE(vkCmdSetDepthWriteEnable_fn, vkCmdSetDepthWriteEnable)
-    LOAD_FN_INSTANCE(vkCmdSetCullMode_fn, vkCmdSetCullMode)
-    LOAD_FN_INSTANCE(vkCmdBindDescriptorSets_fn, vkCmdBindDescriptorSets)
-    LOAD_FN_INSTANCE(vkCmdPushConstants_fn, vkCmdPushConstants)
-    LOAD_FN_INSTANCE(vkCmdBeginRendering_fn, vkCmdBeginRendering)
-    LOAD_FN_INSTANCE(vkCmdEndRendering_fn, vkCmdEndRendering)
-    LOAD_FN_INSTANCE(vkCmdPipelineBarrier_fn, vkCmdPipelineBarrier)
-    LOAD_FN_INSTANCE(vkCmdCopyBufferToImage_fn, vkCmdCopyBufferToImage)
-    LOAD_FN_INSTANCE(vkCmdBlitImage_fn, vkCmdBlitImage)
-    LOAD_FN_INSTANCE(vkCmdClearColorImage_fn, vkCmdClearColorImage)
-    LOAD_FN_INSTANCE(vkBeginCommandBuffer_fn, vkBeginCommandBuffer)
-    LOAD_FN_INSTANCE(vkEndCommandBuffer_fn, vkEndCommandBuffer)
-    LOAD_FN_INSTANCE(vkFreeCommandBuffers_fn, vkFreeCommandBuffers)
-    LOAD_FN_INSTANCE(vkQueueSubmit_fn, vkQueueSubmit)
-    LOAD_FN_INSTANCE(vkQueueWaitIdle_fn, vkQueueWaitIdle)
-
-    /* Images */
-    LOAD_FN_INSTANCE(vkCreateImage_fn, vkCreateImage)
-    LOAD_FN_INSTANCE(vkDestroyImage_fn, vkDestroyImage)
-    LOAD_FN_INSTANCE(vkGetImageMemoryRequirements_fn, vkGetImageMemoryRequirements)
-    LOAD_FN_INSTANCE(vkBindImageMemory_fn, vkBindImageMemory)
-
-    /* Memory allocation */
-    LOAD_FN_INSTANCE(vkAllocateMemory_fn, vkAllocateMemory)
-    LOAD_FN_INSTANCE(vkFreeMemory_fn, vkFreeMemory)
-    LOAD_FN_INSTANCE(vkMapMemory_fn, vkMapMemory)
-    LOAD_FN_INSTANCE(vkUnmapMemory_fn, vkUnmapMemory)
-
-    /* Pipeline */
-    LOAD_FN_INSTANCE(vkCreateGraphicsPipelines_fn, vkCreateGraphicsPipelines)
-    LOAD_FN_INSTANCE(vkDestroyPipeline_fn, vkDestroyPipeline)
-    LOAD_FN_INSTANCE(vkCreatePipelineLayout_fn, vkCreatePipelineLayout)
-    LOAD_FN_INSTANCE(vkDestroyPipelineLayout_fn, vkDestroyPipelineLayout)
-
-    /* Shaders */
-    LOAD_FN_INSTANCE(vkCreateShaderModule_fn, vkCreateShaderModule)
-    LOAD_FN_INSTANCE(vkDestroyShaderModule_fn, vkDestroyShaderModule)
-
-    /* Buffers */
-    LOAD_FN_INSTANCE(vkCreateBuffer_fn, vkCreateBuffer)
-    LOAD_FN_INSTANCE(vkDestroyBuffer_fn, vkDestroyBuffer)
-    LOAD_FN_INSTANCE(vkGetBufferMemoryRequirements_fn, vkGetBufferMemoryRequirements)
-    LOAD_FN_INSTANCE(vkBindBufferMemory_fn, vkBindBufferMemory)
-
-    /* Sampler */
-    LOAD_FN_INSTANCE(vkCreateSampler_fn, vkCreateSampler)
-    LOAD_FN_INSTANCE(vkDestroySampler_fn, vkDestroySampler)
-
-    /* Descriptors */
-    LOAD_FN_INSTANCE(vkCreateDescriptorSetLayout_fn, vkCreateDescriptorSetLayout)
-    LOAD_FN_INSTANCE(vkDestroyDescriptorSetLayout_fn, vkDestroyDescriptorSetLayout)
-    LOAD_FN_INSTANCE(vkCreateDescriptorPool_fn, vkCreateDescriptorPool)
-    LOAD_FN_INSTANCE(vkDestroyDescriptorPool_fn, vkDestroyDescriptorPool)
-    LOAD_FN_INSTANCE(vkAllocateDescriptorSets_fn, vkAllocateDescriptorSets)
-    LOAD_FN_INSTANCE(vkUpdateDescriptorSets_fn, vkUpdateDescriptorSets)
 
     /* -- 2. Create VkSurfaceKHR via SDL2 -- */
     void *window_handle = platform_get_window_handle();
@@ -962,15 +870,17 @@ void render_init(vec2i_t screen_size) {
     queue_ci.queueCount = 1;
     queue_ci.pQueuePriorities = &queue_priority;
 
-    /* Device features, enabled through the single 1.3 path. The five 1.3
-     * feature structs below (timeline semaphores, synchronization2, extended
-     * dynamic state x2, dynamic rendering) are mandatory on any conformant
-     * 1.3 implementation; query first and fail with a named error if the
-     * driver lies about its version. Note the EDS feature structs keep their
-     * EXT names/sTypes even in 1.3 — only the commands and VkDynamicState
-     * values were promoted to core. The v1 feature set is enabled minimally
-     * (see below): only samplerAnisotropy, which the atlas sampler's
-     * anisotropyEnable requires. */
+    /* Device features, enabled through the single 1.3 path. Timeline
+     * semaphores, synchronization2 and dynamic rendering are core (mandatory)
+     * in 1.3; extended dynamic state 1/2 are core in 1.4 and on a 1.3 device
+     * come from the VK_EXT_extended_dynamic_state{,2} extensions — optional
+     * for 1.3 conformance, but mandatory of anything reporting 1.4+ and
+     * universally supported by current drivers. All five are queried below
+     * and any missing one fails with a named error. Note the EDS feature
+     * structs keep their EXT names/sTypes even in 1.4 — only the commands and
+     * VkDynamicState values were promoted to core. The v1 feature set is
+     * enabled minimally (see below): only samplerAnisotropy, which the atlas
+     * sampler's anisotropyEnable requires. */
     VkPhysicalDeviceExtendedDynamicState2FeaturesEXT feat_eds2 = {0};
     feat_eds2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT;
     VkPhysicalDeviceDynamicRenderingFeatures feat_dyn_render = {0};
@@ -1324,8 +1234,6 @@ void render_init(vec2i_t screen_size) {
             vulkan_state.upload_command_pool = VK_NULL_HANDLE;
             goto cleanup;
         }
-
-        vulkan_state.upload_cb_initialized = true;
     }
 
     /* -- 19d. Create default white texture (RENDER_NO_TEXTURE), index 0 --
@@ -1566,7 +1474,6 @@ void render_cleanup(void) {
         vkDestroyCommandPool_fn(vulkan_state.device, vulkan_state.upload_command_pool, NULL);
         vulkan_state.upload_command_pool = VK_NULL_HANDLE;
     }
-    vulkan_state.upload_cb_initialized = false;
 
     /* Destroy quad vertex buffer */
     if (vulkan_state.quad_vertex_buffer_memory != VK_NULL_HANDLE) {
@@ -1858,11 +1765,6 @@ static bool create_swapchain(VkSwapchainKHR old_swapchain) {
     vulkan_state.swapchain_images = (VkImage *)calloc(swapchain_image_count, sizeof(VkImage));
     vkGetSwapchainImagesKHR_fn(vulkan_state.device, vulkan_state.swapchain, &swapchain_image_count, vulkan_state.swapchain_images);
 
-    /* All swapchain images start in UNDEFINED after creation */
-    for (uint32_t i = 0; i < swapchain_image_count && i < MAX_SWAPCHAIN_IMAGES; i++) {
-        vulkan_state.swapchain_image_layouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
-    }
-
     vulkan_state.swapchain_image_views = (VkImageView *)calloc(swapchain_image_count, sizeof(VkImageView));
     for (uint32_t i = 0; i < swapchain_image_count; i++) {
         VkImageViewCreateInfo view_ci = {0};
@@ -1918,12 +1820,6 @@ static void destroy_swapchain(void) {
 /* ------------------------------------------------------------------ */
 /* Image helper: create + allocate image                               */
 /* ------------------------------------------------------------------ */
-
-typedef enum {
-    IMAGE_USAGE_COLOR,
-    IMAGE_USAGE_DEPTH,
-    IMAGE_USAGE_SAMPLED
-} image_usage_t;
 
 static bool create_image(uint32_t width, uint32_t height, uint32_t mip_levels,
                          VkFormat format,
@@ -1982,12 +1878,14 @@ static bool create_image(uint32_t width, uint32_t height, uint32_t mip_levels,
 
 static void cmd_transition_image_layout_fallback(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout);
 static void transition_image_layout_with_pool(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout, VkCommandPool pool);
-static void cmd_transition_image_layout(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout) {
-    /* During init (before deferred CB allocation), use temp CB fallback */
-    if (vulkan_state.command_buffer == VK_NULL_HANDLE) {
-        cmd_transition_image_layout_fallback(image, old_layout, new_layout);
-        return;
-    }
+
+/* Build an image layout transition barrier and the pipeline stages for the
+ * transition. Shared by the current-CB and pool-based transition paths so the
+ * two can't drift apart. */
+static void make_image_layout_barrier(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout,
+                                     VkImageMemoryBarrier *out_barrier,
+                                     VkPipelineStageFlags *out_src_stage,
+                                     VkPipelineStageFlags *out_dst_stage) {
     VkImageMemoryBarrier barrier = {0};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.oldLayout = old_layout;
@@ -2071,6 +1969,20 @@ static void cmd_transition_image_layout(VkImage image, VkImageLayout old_layout,
         src_stage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
     }
 
+    *out_barrier = barrier;
+    *out_src_stage = src_stage;
+    *out_dst_stage = dst_stage;
+}
+
+static void cmd_transition_image_layout(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout) {
+    /* During init (before deferred CB allocation), use temp CB fallback */
+    if (vulkan_state.command_buffer == VK_NULL_HANDLE) {
+        cmd_transition_image_layout_fallback(image, old_layout, new_layout);
+        return;
+    }
+    VkImageMemoryBarrier barrier;
+    VkPipelineStageFlags src_stage, dst_stage;
+    make_image_layout_barrier(image, old_layout, new_layout, &barrier, &src_stage, &dst_stage);
     vkCmdPipelineBarrier_fn(vulkan_state.command_buffer, src_stage, dst_stage, 0,
                             0, NULL, 0, NULL, 1, &barrier);
 }
@@ -2096,66 +2008,9 @@ static void transition_image_layout_with_pool(VkImage image, VkImageLayout old_l
     begin_ci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     VK_CHECK(vkBeginCommandBuffer_fn(command_buffer, &begin_ci));
 
-    VkImageMemoryBarrier barrier = {0};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = old_layout;
-    barrier.newLayout = new_layout;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.layerCount = 1;
-
-    /* Determine aspect mask from layout transition */
-    if (new_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
-        old_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    } else {
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    }
-
-    if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED && new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    } else if (old_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    } else if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED && new_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    } else if (old_layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR && new_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    } else if (old_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL && new_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    } else {
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    }
-
-    VkPipelineStageFlags src_stage = old_layout == VK_IMAGE_LAYOUT_UNDEFINED ?
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT;
-    VkPipelineStageFlags dst_stage = new_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ||
-        new_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ?
-        VK_PIPELINE_STAGE_TRANSFER_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-
-    /* Special case: COLOR_ATTACHMENT uses COLOR_ATTACHMENT_OUTPUT stage */
-    if (new_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
-        dst_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    }
-    if (old_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
-        src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    }
-
-    /* Special case: DEPTH_STENCIL uses EARLY/LATE_FRAGMENT_TESTS stage */
-    if (new_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
-        old_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-        dst_stage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-        if (old_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-            src_stage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-        }
-    }
+    VkImageMemoryBarrier barrier;
+    VkPipelineStageFlags src_stage, dst_stage;
+    make_image_layout_barrier(image, old_layout, new_layout, &barrier, &src_stage, &dst_stage);
 
     vkCmdPipelineBarrier_fn(command_buffer, src_stage, dst_stage, 0,
                             0, NULL, 0, NULL, 1, &barrier);
@@ -2285,27 +2140,10 @@ static void destroy_backbuffer(void) {
  * deferred-resize path (and at init the sampler/descriptor are created
  * separately). Without repointing the descriptor, the post-pass shader keeps
  * sampling a destroyed image view and the GPU hangs on the next draw. */
-static bool recreate_backbuffer_sampler_and_descriptor(void) {
-    if (vulkan_state.backbuffer_sampler != VK_NULL_HANDLE) {
-        vkDestroySampler_fn(vulkan_state.device, vulkan_state.backbuffer_sampler, NULL);
-        vulkan_state.backbuffer_sampler = VK_NULL_HANDLE;
-    }
-    VkSamplerCreateInfo sampler_ci = {0};
-    sampler_ci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sampler_ci.magFilter = VK_FILTER_NEAREST;
-    sampler_ci.minFilter = VK_FILTER_NEAREST;
-    sampler_ci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    sampler_ci.minLod = 0;
-    sampler_ci.maxLod = 1;
-    sampler_ci.maxAnisotropy = 1.0f;
-    sampler_ci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler_ci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler_ci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler_ci.compareOp = VK_COMPARE_OP_NEVER;
-    if (vkCreateSampler_fn(vulkan_state.device, &sampler_ci, NULL, &vulkan_state.backbuffer_sampler) != VK_SUCCESS) {
-        return false;
-    }
-
+/* Rebind the backbuffer descriptor to the (recreated) image view. The
+ * sampler itself is size-independent and is created once in render_init, so
+ * a resize only needs the host-side descriptor update. */
+static bool update_backbuffer_descriptor(void) {
     VkWriteDescriptorSet write = {0};
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = vulkan_state.backbuffer_descriptor_set;
@@ -2539,20 +2377,56 @@ static void destroy_atlas(void) {
 /* ------------------------------------------------------------------ */
 
 static VkShaderModule load_shader_module(const char *filename) {
-    char path[512];
-    snprintf(path, sizeof(path), "build/%s", filename);
+    char path[600];
+    /* Resolve relative to the executable instead of the CWD so the game
+     * works from any directory: the build places wipeout and shaders/
+     * side by side under build/. */
+    char exe_dir[512];
+    ssize_t len = readlink("/proc/self/exe", exe_dir, sizeof(exe_dir) - 1);
+    if (len <= 0 || len >= (ssize_t)sizeof(exe_dir)) {
+        die("Failed to resolve executable path for shader lookup");
+    }
+    exe_dir[len] = '\0';
+    char *slash = strrchr(exe_dir, '/');
+    if (!slash) {
+        die("Unexpected executable path: %s", exe_dir);
+    }
+    *slash = '\0';
+    int path_len = snprintf(path, sizeof(path), "%s/%s", exe_dir, filename);
+    if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
+        die("Shader path too long: %s/%s", exe_dir, filename);
+    }
     FILE *f = fopen(path, "rb");
     if (!f) {
         fprintf(stderr, "Failed to open shader file: %s\n", path);
         return VK_NULL_HANDLE;
     }
 
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fprintf(stderr, "Failed to seek in shader file: %s\n", path);
+        fclose(f);
+        return VK_NULL_HANDLE;
+    }
     long size = ftell(f);
+    if (size <= 0) {
+        fprintf(stderr, "Failed to determine shader file size: %s\n", path);
+        fclose(f);
+        return VK_NULL_HANDLE;
+    }
     fseek(f, 0, SEEK_SET);
 
-    unsigned char *spv = (unsigned char *)malloc(size);
-    fread(spv, 1, size, f);
+    unsigned char *spv = (unsigned char *)malloc((size_t)size);
+    if (!spv) {
+        fprintf(stderr, "Failed to allocate %ld bytes for shader: %s\n", size, path);
+        fclose(f);
+        return VK_NULL_HANDLE;
+    }
+    if (fread(spv, 1, (size_t)size, f) != (size_t)size) {
+        fprintf(stderr, "Failed to read shader file: %s\n", path);
+        free(spv);
+        fclose(f);
+        return VK_NULL_HANDLE;
+    }
     fclose(f);
 
     VkShaderModule shader_module;
@@ -3072,7 +2946,7 @@ void render_frame_prepare(void) {
             if (!create_backbuffer()) {
                 return;
             }
-            if (!recreate_backbuffer_sampler_and_descriptor()) {
+            if (!update_backbuffer_descriptor()) {
                 return;
             }
             /* Atlas min filter follows the resolution (GL parity:
@@ -3546,9 +3420,6 @@ void render_frame_end(void) {
         fprintf(stderr, "vkQueuePresentKHR failed: %d\n", present_result);
     }
 
-    /* After presentation, the swapchain image is in PRESENT_SRC_KHR */
-    vulkan_state.swapchain_image_layouts[vulkan_state.current_swapchain_image] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
     /* Only here do we have the complete stats (mirrors GL reference) */
     memcpy(&end_stats, &running_stats, sizeof(render_stats_t));
 
@@ -3710,10 +3581,10 @@ void render_flush(void) {
      * glPolygonOffset(-32, 1), so factor=-32 scales the slope, pushing the
      * shadow in front of the track (toward the camera) proportional to its
      * depth slope; a positive offset would push it behind the track and fail
-     * the LESS depth test. depthBiasClamp=0.0 means "no clamping" (the spec's
-     * dbclamp is the identity when clamp==0), matching GL's unclamped
-     * glPolygonOffset; a nonzero clamp would require the depthBiasClamp
-     * feature and only bound the bias from above (clamp>0) or below.
+     * the LESS depth test. depthBiasClamp=0.0 means "no clamping" (with the
+     * depthBiasClamp feature disabled, 0 is the only legal value and the bias
+     * is unclamped), matching GL's unclamped glPolygonOffset; a nonzero clamp
+     * would require the feature and clamps the bias to [-clamp, +clamp].
      * bias==0 mirrors glDisable(GL_POLYGON_OFFSET_FILL) (both terms zero). */
     vkCmdSetDepthBias_fn(vulkan_state.command_buffer,
                         vulkan_state.current_depth_bias != 0.0f ? 1.0f : 0.0f,
@@ -3789,7 +3660,7 @@ void render_set_view(vec3_t pos, vec3_t angles) {
      * *after* a render_set_view_2d() call (menu_update sets up the 2D view
      * before the page draw func). Without this, the object would be
      * transformed with the 2D orthographic projection, landing at an
-     * out-of-range depth (~z/1.0 far past [-1,1]) that fails the LESS depth
+     * out-of-range depth (~z/1.0 far past [0,1]) that fails the LESS depth
      * test — i.e. invisible. The GL renderer selects projection_mat_3d
      * directly in this setter; this is the VK equivalent. */
     vulkan_state.current_is_3d = true;
@@ -3887,13 +3758,14 @@ void render_push_tris(tris_t tris, uint16_t texture_index) {
     }
 
     /* UVs arrive as texture-local pixel coordinates (the shared contract with
-     * render_gl.c). Add the texture's atlas offset here; the vertex shader
-     * normalizes by the atlas size. */
+     * render_gl.c). Add the texture's atlas offset and normalize to [0,1] by
+     * the atlas size here, so the vertex shader passes UVs through verbatim. */
     vulkan_texture_t *t = &vulkan_state.textures[texture_index];
+    const float atlas_size = (float)(ATLAS_SIZE * ATLAS_GRID);
     for (int i = 0; i < 3; i++) {
         vertex_t v = tris.vertices[i];
-        v.uv.x += (float)t->offset.x;
-        v.uv.y += (float)t->offset.y;
+        v.uv.x = (v.uv.x + (float)t->offset.x) / atlas_size;
+        v.uv.y = (v.uv.y + (float)t->offset.y) / atlas_size;
         vulkan_state.vertex_data[vulkan_state.vertex_count++] = v;
     }
 }
@@ -3904,7 +3776,7 @@ void render_push_sprite(vec3_t pos, vec2i_t size, rgba_t color, uint16_t texture
 
     vulkan_texture_t *t = &vulkan_state.textures[texture_index];
     /* UVs are texture-local pixel-space (mirrors render_gl.c); render_push_tris
-     * adds the atlas offset and the vertex shader normalizes by its size. */
+     * adds the atlas offset and normalizes by the atlas size. */
     const float sw = (float)t->size.x;
     const float sh = (float)t->size.y;
 
@@ -3943,11 +3815,11 @@ void render_push_2d(vec2i_t pos, vec2i_t size, rgba_t color, uint16_t texture_in
 
 void render_push_2d_tile(vec2i_t pos, vec2i_t uv_offset, vec2i_t uv_size,
                          vec2i_t size, rgba_t color, uint16_t texture_index) {
+    if (vulkan_state.textures_len == 0) return;
     error_if(texture_index >= vulkan_state.textures_len, "Invalid texture %d", texture_index);
 
     /* UVs are in pixel-space within the texture cell (mirrors render_gl.c);
-     * render_push_tris adds the atlas offset and the vertex shader
-     * normalizes by its size. */
+     * render_push_tris adds the atlas offset and normalizes by the atlas size. */
     const float uw = (float)uv_size.x;
     const float uh = (float)uv_size.y;
     const float uox = (float)uv_offset.x;
@@ -4022,9 +3894,8 @@ static void atlas_to_transfer_dst(VkCommandBuffer cb) {
                 .layerCount = 1,
             };
         }
-        /* Vulkan 1.4 signature: a single pColor applies to every range in
-         * pRanges ("Each specified range in pRanges is cleared to the value
-         * specified by pColor"). */
+        /* A single pColor applies to every range in pRanges ("Each specified
+         * range in pRanges is cleared to the value specified by pColor"). */
         vkCmdClearColorImage_fn(cb, vulkan_state.atlas_image,
                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                 &black, ATLAS_MIP_LEVELS, ranges);

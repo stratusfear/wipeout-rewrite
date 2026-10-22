@@ -20,6 +20,7 @@ void main() {
      * exactly the GL depth values — so near geometry (NDC z < 0) is not
      * discarded and occlusion matches GL. */
     gl_Position.z = 0.5 * gl_Position.z + 0.5 * gl_Position.w;
-    v_uv = a_uv / 2048.0;
+    /* a_uv arrives pre-normalized to [0,1] by render_push_tris. */
+    v_uv = a_uv;
     v_color = a_color;
 }
