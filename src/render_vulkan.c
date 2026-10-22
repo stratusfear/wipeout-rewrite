@@ -166,8 +166,7 @@ static PFN_vkUpdateDescriptorSets                   vkUpdateDescriptorSets_fn;
 #define LOAD_FN(ptr, name, inst) \
     ptr = (typeof(ptr))vk_get_proc(#name, inst); \
     if (!(ptr)) { \
-        fprintf(stderr, "Failed to load %s\n", #name); \
-        return; \
+        die("Failed to load Vulkan function %s", #name); \
     }
 #define LOAD_FN_NULL(ptr, name) LOAD_FN(ptr, name, VK_NULL_HANDLE)
 #define LOAD_FN_INSTANCE(ptr, name) LOAD_FN(ptr, name, vulkan_state.instance)
@@ -672,8 +671,7 @@ void render_init(vec2i_t screen_size) {
             vk_global_get_proc_addr = (PFN_vkGetInstanceProcAddr)dlsym(vulkan_handle, "vkGetInstanceProcAddr");
         }
         if (vk_global_get_proc_addr == NULL) {
-            fprintf(stderr, "Failed to get vkGetInstanceProcAddr (SDL: %s)\n", SDL_GetError());
-            return;
+            die("Failed to get vkGetInstanceProcAddr (SDL: %s)", SDL_GetError());
         }
     }
 
@@ -687,7 +685,7 @@ void render_init(vec2i_t screen_size) {
     const char **sdl_exts = NULL;
     if (sdl_ext_count > 0) {
         sdl_exts = (const char **)calloc(sdl_ext_count, sizeof(const char *));
-        if (!sdl_exts) { return; }
+        if (!sdl_exts) { die("Failed to allocate SDL extension list"); }
         SDL_Vulkan_GetInstanceExtensions((SDL_Window*)platform_get_window_handle(), &sdl_ext_count, sdl_exts);
     }
 
@@ -706,7 +704,7 @@ void render_init(vec2i_t screen_size) {
     }
 
     exts = (const char **)calloc(total_ext_count, sizeof(const char *));
-    if (!exts) { return; }
+    if (!exts) { die("Failed to allocate extension list"); }
 
     memcpy(exts, sdl_exts, sdl_ext_count * sizeof(const char *));
 
@@ -742,8 +740,7 @@ void render_init(vec2i_t screen_size) {
     free(exts);
 
     if (result != VK_SUCCESS) {
-        fprintf(stderr, "vkCreateInstance failed: %d (Vulkan 1.3 required)\n", result);
-        return;
+        die("vkCreateInstance failed: %d (Vulkan 1.3 required)", result);
     }
 
     /* -- Phase 3: Load instance functions (need valid VkInstance) -- */
@@ -862,17 +859,11 @@ void render_init(vec2i_t screen_size) {
     /* -- 2. Create VkSurfaceKHR via SDL2 -- */
     void *window_handle = platform_get_window_handle();
     if (!window_handle) {
-        fprintf(stderr, "platform_get_window_handle returned NULL\n");
-        vkDestroyInstance_fn(vulkan_state.instance, NULL);
-        vulkan_state.instance = VK_NULL_HANDLE;
-        return;
+        die("platform_get_window_handle returned NULL");
     }
 
     if (SDL_Vulkan_CreateSurface((SDL_Window*)window_handle, vulkan_state.instance, &vulkan_state.surface) != SDL_TRUE) {
-        fprintf(stderr, "SDL_Vulkan_CreateSurface failed\n");
-        vkDestroyInstance_fn(vulkan_state.instance, NULL);
-        vulkan_state.instance = VK_NULL_HANDLE;
-        return;
+        die("SDL_Vulkan_CreateSurface failed");
     }
 
     /* -- 3. Select physical device -- */
@@ -1452,11 +1443,15 @@ void render_init(vec2i_t screen_size) {
      * allocated once the render loop actually begins. */
     vulkan_state.command_buffer = VK_NULL_HANDLE;
 
-    printf("Vulkan renderer initialized: %s\n", vulkan_state.physical_device ? "OK" : "FAILED");
+    printf("Vulkan renderer initialized\n");
     return;
 
 cleanup:
     render_cleanup();
+    /* Init failure is fatal: continuing would leave the next render_* call
+     * dereferencing NULL function pointers and handles. die() prints the
+     * file/line and exits; the per-site message above says what failed. */
+    die("Vulkan renderer initialization failed");
 }
 
 void render_cleanup(void) {
