@@ -3974,15 +3974,18 @@ static void atlas_to_transfer_dst(VkCommandBuffer cb) {
 /* Generate mip levels 1..ATLAS_MIP_LEVELS-1 from level 0 with linear blits
  * (mirrors the GL renderer's glGenerateMipmap) and transition every level
  * to SHADER_READ_ONLY_OPTIMAL. Level 0 must have just been written while in
- * TRANSFER_DST_OPTIMAL layout. */
+ * TRANSFER_DST_OPTIMAL layout. Each level stays in TRANSFER_DST_OPTIMAL
+ * until it is used as a blit source, where it transitions to
+ * TRANSFER_SRC_OPTIMAL (a valid blit source layout). */
 static void atlas_generate_mips_and_finish(VkCommandBuffer cb,
                                            uint32_t atlas_width, uint32_t atlas_height) {
     for (uint32_t i = 1; i < ATLAS_MIP_LEVELS; i++) {
-        /* Level i-1 must be TRANSFER_SRC_OPTIMAL for the blit. */
+        /* Level i-1 was just written (or blitted) while in
+         * TRANSFER_DST_OPTIMAL; move it to TRANSFER_SRC_OPTIMAL for the
+         * blit below (also provides the write -> read dependency). */
         VkImageMemoryBarrier b = {0};
         b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        b.oldLayout = (i == 1) ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL :
-                                 VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
