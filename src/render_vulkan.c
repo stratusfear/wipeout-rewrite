@@ -1695,12 +1695,13 @@ static VkPresentModeKHR choose_present_mode(VkPhysicalDevice physical_device, Vk
 
 static VkExtent2D choose_extent(VkSurfaceCapabilitiesKHR *caps, vec2i_t screen_size) {
     if (caps->currentExtent.width != UINT32_MAX) {
-        /* Defensive clamp: some drivers report a non-conformant currentExtent
-         * (e.g. 16384×16384, a historical Mesa Wayland maxImageExtent default)
-         * that exceeds maxImageExtent. Clamp to the driver's own bounds, and
-         * enforce a hard 4096 upper bound in case maxImageExtent is also bad. */
+        /* currentExtent is valid: the swapchain imageExtent must equal it
+         * exactly (spec), so a window larger than 4K in either dimension
+         * (5K/8K displays) must not be clamped down. The min/maxImageExtent
+         * clamp below is a no-op for conformant drivers (currentExtent is
+         * always within those bounds) but guards against non-conformant
+         * reports where currentExtent exceeds maxImageExtent. */
         VkExtent2D extent = caps->currentExtent;
-        uint32_t max_allowed = 4096;
         if (extent.width > caps->maxImageExtent.width) {
             extent.width = caps->maxImageExtent.width;
         }
@@ -1713,9 +1714,6 @@ static VkExtent2D choose_extent(VkSurfaceCapabilitiesKHR *caps, vec2i_t screen_s
         if (extent.height < caps->minImageExtent.height) {
             extent.height = caps->minImageExtent.height;
         }
-        /* Hard upper bound — no display needs more than 4K */
-        if (extent.width > max_allowed) extent.width = max_allowed;
-        if (extent.height > max_allowed) extent.height = max_allowed;
         return extent;
     }
     /* currentExtent is UINT32_MAX — driver accepts any size.
