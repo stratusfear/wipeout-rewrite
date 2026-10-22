@@ -946,16 +946,15 @@ void render_init(vec2i_t screen_size) {
     queue_ci.queueCount = 1;
     queue_ci.pQueuePriorities = &queue_priority;
 
-    /* Device features, queried and enabled through the single 1.3 path:
-     * the v1 feature set (features2.features — samplerAnisotropy is required
-     * by the atlas sampler's anisotropyEnable) rides along with the five 1.3
-     * feature structs below, so the later modernization steps (timeline
-     * semaphores, synchronization2, extended dynamic state, dynamic
-     * rendering) need no further device-creation change. All of it is
-     * mandatory on any conformant 1.3 implementation; query first and fail
-     * with a named error if the driver lies about its version. Note the EDS
-     * feature structs keep their EXT names/sTypes even in 1.3 — only the
-     * commands and VkDynamicState values were promoted to core. */
+    /* Device features, enabled through the single 1.3 path. The five 1.3
+     * feature structs below (timeline semaphores, synchronization2, extended
+     * dynamic state x2, dynamic rendering) are mandatory on any conformant
+     * 1.3 implementation; query first and fail with a named error if the
+     * driver lies about its version. Note the EDS feature structs keep their
+     * EXT names/sTypes even in 1.3 — only the commands and VkDynamicState
+     * values were promoted to core. The v1 feature set is enabled minimally
+     * (see below): only samplerAnisotropy, which the atlas sampler's
+     * anisotropyEnable requires. */
     VkPhysicalDeviceExtendedDynamicState2FeaturesEXT feat_eds2 = {0};
     feat_eds2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT;
     VkPhysicalDeviceDynamicRenderingFeatures feat_dyn_render = {0};
@@ -975,6 +974,19 @@ void render_init(vec2i_t screen_size) {
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.pNext = &feat_timeline;
     vkGetPhysicalDeviceFeatures2_fn(vulkan_state.physical_device, &features2);
+
+    if (!features2.features.samplerAnisotropy) {
+        fprintf(stderr, "Vulkan driver missing required feature: samplerAnisotropy\n");
+        goto cleanup;
+    }
+
+    /* Enable only the v1 features this renderer actually uses. The query
+     * above filled features2.features with everything the device supports;
+     * passing that through would silently enable robustBufferAccess,
+     * depthBiasClamp, textureCompression* and friends. The only v1 feature
+     * in use is samplerAnisotropy (the atlas sampler's anisotropyEnable). */
+    features2.features = (VkPhysicalDeviceFeatures){0};
+    features2.features.samplerAnisotropy = VK_TRUE;
 
     if (!feat_timeline.timelineSemaphore) {
         fprintf(stderr, "Vulkan 1.3 driver missing required feature: timelineSemaphore\n");
