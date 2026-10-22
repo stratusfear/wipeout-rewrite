@@ -3555,8 +3555,10 @@ void render_frame_end(void) {
     /* Advance frame counter (wraps 0..MAX_FRAMES_IN_FLIGHT-1) */
     vulkan_state.frame_index = (f + 1) % MAX_FRAMES_IN_FLIGHT;
 
-    /* Clear working pointer — texture uploads between frames must use the
-     * one-shot submit-and-wait path, not a non-recording command buffer. */
+    /* Clear working pointer — no command buffer is recording after this
+     * frame. Texture uploads queued between frames are flushed at the next
+     * prepare (or before the first draw of a frame that created textures
+     * mid-frame), so no upload path depends on a non-recording CB here. */
     vulkan_state.command_buffer = VK_NULL_HANDLE;
 }
 
@@ -3571,6 +3573,54 @@ void render_flush(void) {
         vulkan_state.vertex_count = 0;
         vulkan_state.vertex_flushed = 0;
         return;
+    }
+
+    /* Texture uploads queued mid-frame (e.g. a level load during
+     * game_update) must reach the atlas before the first draw that could
+     * sample them. Transfers cannot be recorded inside the active rendering
+     * scope, so end it, flush on a separate command buffer (submit + wait),
+     * then re-open with LOAD_OP_LOAD to preserve what is already drawn. The
+     * viewport/scissor are dynamic and re-issued here; pipeline/descriptor
+     * bindings persist across End/BeginRendering. */
+    if (vulkan_state.pending_uploads_len > 0) {
+        vkCmdEndRendering_fn(vulkan_state.command_buffer);
+        render_flush_pending_textures();
+
+        VkRenderingAttachmentInfo color_attachment = {0};
+        color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        color_attachment.imageView = vulkan_state.backbuffer_image_view;
+        color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+        VkRenderingAttachmentInfo depth_attachment = {0};
+        depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        depth_attachment.imageView = vulkan_state.backbuffer_depth_image_view;
+        depth_attachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+
+        VkRenderingInfo rendering_info = {0};
+        rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        rendering_info.renderArea.extent.width = (uint32_t)vulkan_state.backbuffer_size.x;
+        rendering_info.renderArea.extent.height = (uint32_t)vulkan_state.backbuffer_size.y;
+        rendering_info.layerCount = 1;
+        rendering_info.viewMask = 0;
+        rendering_info.colorAttachmentCount = 1;
+        rendering_info.pColorAttachments = &color_attachment;
+        rendering_info.pDepthAttachment = &depth_attachment;
+        vkCmdBeginRendering_fn(vulkan_state.command_buffer, &rendering_info);
+
+        VkViewport vp = {0};
+        vp.width  = (float)vulkan_state.backbuffer_size.x;
+        vp.height = (float)vulkan_state.backbuffer_size.y;
+        vp.maxDepth = 1.0f;
+        vkCmdSetViewport_fn(vulkan_state.command_buffer, 0, 1, &vp);
+
+        VkRect2D scissor = {0};
+        scissor.extent.width = (uint32_t)vulkan_state.backbuffer_size.x;
+        scissor.extent.height = (uint32_t)vulkan_state.backbuffer_size.y;
+        vkCmdSetScissor_fn(vulkan_state.command_buffer, 0, 1, &scissor);
     }
 
     uint32_t f = vulkan_state.frame_index;
@@ -4048,47 +4098,17 @@ static void atlas_generate_mips_and_finish(VkCommandBuffer cb,
 }
 
 /* ------------------------------------------------------------------ */
-/* Flush pending texture uploads (deferred until after game_init)        */
+/* Flush pending texture uploads (batched)                              */
 /* ------------------------------------------------------------------ */
 void render_flush_pending_textures(void) {
     if (vulkan_state.pending_uploads_len == 0) return;
 
     uint32_t atlas_width = ATLAS_SIZE * ATLAS_GRID;
     uint32_t atlas_height = ATLAS_SIZE * ATLAS_GRID;
-    uint32_t pixel_size = sizeof(rgba_t);
-    uint32_t buf_size = atlas_width * atlas_height * pixel_size;
-
-    /* Allocate a single staging buffer for all uploads */
-    VkBuffer staging_buffer = VK_NULL_HANDLE;
-    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
-    {
-        VkBufferCreateInfo buf_ci = {0};
-        buf_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        buf_ci.size = buf_size;
-        buf_ci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        buf_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        VK_CHECK(vkCreateBuffer_fn(vulkan_state.device, &buf_ci, NULL, &staging_buffer));
-
-        VkMemoryRequirements mem_reqs;
-        vkGetBufferMemoryRequirements_fn(vulkan_state.device, staging_buffer, &mem_reqs);
-
-        VkMemoryAllocateInfo alloc_ci = {0};
-        alloc_ci.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        alloc_ci.allocationSize = mem_reqs.size;
-        alloc_ci.memoryTypeIndex = find_memory_type(vulkan_state.physical_device, mem_reqs.memoryTypeBits,
-                                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (alloc_ci.memoryTypeIndex == UINT32_MAX) {
-            goto cleanup_staging;
-        }
-        VK_CHECK(vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL, &staging_memory));
-        VK_CHECK(vkBindBufferMemory_fn(vulkan_state.device, staging_buffer, staging_memory, 0));
-    }
-
-    /* Map and fill atlas with all textures in one go */
-    void *data;
-    VK_CHECK(vkMapMemory_fn(vulkan_state.device, staging_memory, 0, buf_size, 0, &data));
-    memset(data, 0, buf_size);
-
+    /* Fill all pending textures into the persistent staging buffer at their
+     * atlas positions (row stride atlas_width) so the whole-block copies
+     * below read them back at the same stride. Each fill writes the entire
+     * border-padded block, so no copied pixel is ever left unwritten. */
     for (uint32_t i = 0; i < vulkan_state.pending_uploads_len; i++) {
         pending_upload_t *upload = &vulkan_state.pending_uploads[i];
         uint32_t x = upload->grid_x * ATLAS_GRID;
@@ -4096,86 +4116,58 @@ void render_flush_pending_textures(void) {
         uint32_t bw = upload->width + ATLAS_BORDER * 2;
         uint32_t bh = upload->height + ATLAS_BORDER * 2;
 
-        /* Fill this texture's border-padded block (borders + body) at its
-         * atlas position (row stride atlas_width) so the whole-block copy
-         * below reads it back at the same stride. The fill writes the entire
-         * block, so no atlas pixel is ever left unwritten (the staging buffer
-         * was already zeroed above). */
-        rgba_t *block = (rgba_t *)data + (size_t)y * atlas_width + x;
+        rgba_t *block = (rgba_t *)vulkan_state.upload_staging_mapped + (size_t)y * atlas_width + x;
         atlas_fill_block(block, atlas_width, bw, bh, upload->width, upload->height, upload->pixels);
     }
-    vkUnmapMemory_fn(vulkan_state.device, staging_memory);
 
-    /* Create command pool and buffer for the batch upload */
-    VkCommandPool flush_pool;
-    {
-        VkCommandPoolCreateInfo pool_ci = {0};
-        pool_ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        pool_ci.queueFamilyIndex = vulkan_state.graphics_queue_family;
-        pool_ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        if (vkCreateCommandPool_fn(vulkan_state.device, &pool_ci, NULL, &flush_pool) != VK_SUCCESS) {
-            fprintf(stderr, "Failed to create flush command pool\n");
-            goto cleanup_staging;
-        }
+    /* Record the batch on the persistent upload command buffer (reset +
+     * reuse). It is a separate command buffer submitted to the same queue,
+     * so it executes ahead of the frame's command buffer and its writes are
+     * visible to every draw recorded after this point. */
+    VkResult reset_r = vkResetCommandPool_fn(vulkan_state.device, vulkan_state.upload_command_pool, 0);
+    (void)reset_r;
+
+    VK_CHECK(vkBeginCommandBuffer_fn(vulkan_state.upload_command_buffer,
+                                     &(VkCommandBufferBeginInfo){
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    }));
+
+    /* All mip levels -> TRANSFER_DST_OPTIMAL (clears to black on first upload) */
+    atlas_to_transfer_dst(vulkan_state.upload_command_buffer);
+
+    /* Copy all textures to the atlas (whole border-padded blocks) */
+    for (uint32_t i = 0; i < vulkan_state.pending_uploads_len; i++) {
+        pending_upload_t *upload = &vulkan_state.pending_uploads[i];
+        uint32_t x = upload->grid_x * ATLAS_GRID;
+        uint32_t y = upload->grid_y * ATLAS_GRID;
+        uint32_t bw = upload->width + ATLAS_BORDER * 2;
+        uint32_t bh = upload->height + ATLAS_BORDER * 2;
+
+        VkBufferImageCopy region = {0};
+        region.bufferOffset = (uint32_t)((size_t)(y * atlas_width + x) * sizeof(rgba_t));
+        region.bufferRowLength = atlas_width;    /* rows in pixels, not bytes */
+        region.bufferImageHeight = 0;             /* 0 = same as image extent height */
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = (VkExtent3D){bw, bh, 1};
+        region.imageOffset = (VkOffset3D){(int32_t)x, (int32_t)y, 0};
+        vkCmdCopyBufferToImage_fn(vulkan_state.upload_command_buffer, vulkan_state.upload_staging_buffer,
+                                  vulkan_state.atlas_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     }
 
-    VkCommandBuffer command_buffer;
-    {
-        VkCommandBufferAllocateInfo alloc_ci_cb = {0};
-        alloc_ci_cb.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        alloc_ci_cb.commandPool = flush_pool;
-        alloc_ci_cb.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        alloc_ci_cb.commandBufferCount = 1;
-        VK_CHECK(vkAllocateCommandBuffers_fn(vulkan_state.device, &alloc_ci_cb, &command_buffer));
+    /* Generate mip levels 1..N-1 and transition all levels to SHADER_READ_ONLY_OPTIMAL */
+    atlas_generate_mips_and_finish(vulkan_state.upload_command_buffer, atlas_width, atlas_height);
 
-        VkCommandBufferBeginInfo begin_ci = {0};
-        begin_ci.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        VK_CHECK(vkBeginCommandBuffer_fn(command_buffer, &begin_ci));
+    VK_CHECK(vkEndCommandBuffer_fn(vulkan_state.upload_command_buffer));
 
-        /* All mip levels -> TRANSFER_DST_OPTIMAL (clears to black on first upload) */
-        atlas_to_transfer_dst(command_buffer);
-
-        /* Copy all textures to the atlas (whole border-padded blocks) */
-        for (uint32_t i = 0; i < vulkan_state.pending_uploads_len; i++) {
-            pending_upload_t *upload = &vulkan_state.pending_uploads[i];
-            uint32_t x = upload->grid_x * ATLAS_GRID;
-            uint32_t y = upload->grid_y * ATLAS_GRID;
-            uint32_t bw = upload->width + ATLAS_BORDER * 2;
-            uint32_t bh = upload->height + ATLAS_BORDER * 2;
-
-            VkBufferImageCopy region = {0};
-            region.bufferOffset = (uint32_t)((size_t)(y * atlas_width + x) * pixel_size);
-            region.bufferRowLength = atlas_width;    /* rows in pixels, not bytes */
-            region.bufferImageHeight = 0;             /* 0 = same as image extent height */
-            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.layerCount = 1;
-            region.imageExtent = (VkExtent3D){bw, bh, 1};
-            region.imageOffset = (VkOffset3D){(int32_t)x, (int32_t)y, 0};
-            vkCmdCopyBufferToImage_fn(command_buffer, staging_buffer, vulkan_state.atlas_image,
-                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        }
-
-        /* Generate mip levels 1..N-1 and transition all levels to SHADER_READ_ONLY_OPTIMAL */
-        atlas_generate_mips_and_finish(command_buffer, atlas_width, atlas_height);
-
-        VK_CHECK(vkEndCommandBuffer_fn(command_buffer));
-    }
-
-    /* Submit and wait */
     VkSubmitInfo submit_info = {0};
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &command_buffer;
+    submit_info.pCommandBuffers = &vulkan_state.upload_command_buffer;
     VK_CHECK(vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit_info, VK_NULL_HANDLE));
     vkQueueWaitIdle_fn(vulkan_state.graphics_queue);
 
-    /* Cleanup */
-    vkFreeCommandBuffers_fn(vulkan_state.device, flush_pool, 1, &command_buffer);
-    vkDestroyCommandPool_fn(vulkan_state.device, flush_pool, NULL);
-
-cleanup_staging:
-    vkDestroyBuffer_fn(vulkan_state.device, staging_buffer, NULL);
-    vkFreeMemory_fn(vulkan_state.device, staging_memory, NULL);
     /* Free the queued pixel copies (allocated in render_texture_create) */
     for (uint32_t i = 0; i < vulkan_state.pending_uploads_len; i++) {
         free(vulkan_state.pending_uploads[i].pixels);
@@ -4233,101 +4225,31 @@ uint16_t render_texture_create(uint32_t width, uint32_t height, rgba_t *pixels) 
     uint32_t x = grid_x * ATLAS_GRID;
     uint32_t y = grid_y * ATLAS_GRID;
 
-    /* During game_init (before deferred CB allocation), defer GPU uploads
-     * by queuing them to pending_uploads. They will be flushed after
-     * game_init() when the command buffer is available. */
-    if (vulkan_state.command_buffer == VK_NULL_HANDLE && pixels) {
-        if (vulkan_state.pending_uploads_len < PENDING_UPLOADS_MAX) {
-            uint16_t idx = vulkan_state.textures_len;
-            pending_upload_t *upload = &vulkan_state.pending_uploads[vulkan_state.pending_uploads_len++];
-            upload->width = width;
-            upload->height = height;
-            /* The caller's pixel buffer lives in mem_temp and is freed
-             * right after render_texture_create returns (see image.c), so
-             * copy the pixels into persistent storage; the flush frees
-             * the copies. */
-            {
-                size_t pixel_bytes = (size_t)width * height * sizeof(rgba_t);
-                upload->pixels = (rgba_t *)malloc(pixel_bytes);
-                memcpy(upload->pixels, pixels, pixel_bytes);
-            }
-            upload->grid_x = grid_x;
-            upload->grid_y = grid_y;
-            upload->texture_index = idx;
-        }
-        goto record_texture;
-    }
-
-    /* Upload pixels to atlas image via persistent staging buffer.
-     * Reusing a single pre-allocated buffer avoids per-upload GPU memory
-     * allocation/deallocation, which is expensive on all drivers and causes
-     * allocator fragmentation over time (standard Vulkan best practice). */
+    /* Queue the pixel upload to pending_uploads regardless of frame state;
+     * the batch is flushed at a safe point (top of render_frame_prepare, or
+     * before the first draw of a frame that created textures mid-frame).
+     * The caller's pixel buffer lives in mem_temp and is freed right after
+     * render_texture_create returns (see image.c), so copy the pixels into
+     * persistent storage; the flush frees the copies. If the queue is full,
+     * flush what is queued first, then queue this upload. */
     if (pixels) {
-        uint32_t atlas_width = ATLAS_SIZE * ATLAS_GRID;
-        uint32_t atlas_height = ATLAS_SIZE * ATLAS_GRID;
-        uint32_t pixel_size = sizeof(rgba_t);
-
-        /* Fill just this texture's border-padded block (borders + body) at its
-         * atlas position (row stride atlas_width); the copy below reads the
-         * whole block back at the same stride, and the fill writes the entire
-         * block so no part of the atlas block is ever left unwritten. */
-        rgba_t *block = (rgba_t *)vulkan_state.upload_staging_mapped + (size_t)y * atlas_width + x;
-        atlas_fill_block(block, atlas_width, bw, bh, width, height, pixels);
-
-        /* Copy buffer to image with layout transitions.
-         * Always use a one-shot submit-and-wait: the one-shot path is
-         * safe when called between frames (command_buffer == NULL) and
-         * also when called during an active render pass (layout
-         * transitions and vkCmdCopyBufferToImage are invalid inside
-         * a render pass). */
-        VkBufferImageCopy region = {0};
-        region.bufferOffset = (uint32_t)((size_t)(y * atlas_width + x) * pixel_size);
-        region.bufferRowLength = atlas_width;
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = (VkExtent3D){bw, bh, 1};
-        region.imageOffset = (VkOffset3D){(int32_t)x, (int32_t)y, 0};
-
-        /* One-shot submit-and-wait using persistent command pool.
-         * Reset + reuse instead of create/destroy per upload avoids the
-         * overhead of repeated pool allocation (standard Vulkan best
-         * practice; all drivers penalize rapid pool churn). */
-        {
-            VkResult reset_r = vkResetCommandPool_fn(vulkan_state.device,
-                                                      vulkan_state.upload_command_pool, 0);
-            (void)reset_r;
-
-            VK_CHECK(vkBeginCommandBuffer_fn(vulkan_state.upload_command_buffer,
-                                             &(VkCommandBufferBeginInfo){
-                .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-                .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-            }));
-
-            /* All mip levels -> TRANSFER_DST_OPTIMAL (clears to black on first upload) */
-            atlas_to_transfer_dst(vulkan_state.upload_command_buffer);
-
-            vkCmdCopyBufferToImage_fn(vulkan_state.upload_command_buffer,
-                                      vulkan_state.upload_staging_buffer, vulkan_state.atlas_image,
-                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-            /* Generate mip levels 1..N-1 and transition all levels to SHADER_READ_ONLY_OPTIMAL */
-            atlas_generate_mips_and_finish(vulkan_state.upload_command_buffer, atlas_width, atlas_height);
-
-            VK_CHECK(vkEndCommandBuffer_fn(vulkan_state.upload_command_buffer));
-
-            VkSubmitInfo submit = {0};
-            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submit.commandBufferCount = 1;
-            submit.pCommandBuffers = &vulkan_state.upload_command_buffer;
-            VK_CHECK(vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit, VK_NULL_HANDLE));
-            vkQueueWaitIdle_fn(vulkan_state.graphics_queue);
-
-            /* Update layout tracking */
-            vulkan_state.atlas_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (vulkan_state.pending_uploads_len >= PENDING_UPLOADS_MAX) {
+            render_flush_pending_textures();
         }
+        uint16_t idx = vulkan_state.textures_len;
+        pending_upload_t *upload = &vulkan_state.pending_uploads[vulkan_state.pending_uploads_len++];
+        upload->width = width;
+        upload->height = height;
+        {
+            size_t pixel_bytes = (size_t)width * height * sizeof(rgba_t);
+            upload->pixels = (rgba_t *)malloc(pixel_bytes);
+            memcpy(upload->pixels, pixels, pixel_bytes);
+        }
+        upload->grid_x = grid_x;
+        upload->grid_y = grid_y;
+        upload->texture_index = idx;
     }
 
-record_texture:
     /* Record texture metadata */
     uint16_t idx = vulkan_state.textures_len++;
     vulkan_state.textures[idx] = (vulkan_texture_t){
@@ -4344,6 +4266,13 @@ vec2i_t render_texture_size(uint16_t texture_index) {
 
 void render_texture_replace_pixels(int16_t texture_index, rgba_t *pixels) {
     error_if((uint16_t)texture_index >= vulkan_state.textures_len, "Invalid texture %d", texture_index);
+
+    /* Flush any queued uploads first: a pending upload for this texture
+     * (created with pixels, not yet flushed) would otherwise overwrite the
+     * replacement pixels staged below when the batch runs. */
+    if (vulkan_state.pending_uploads_len > 0) {
+        render_flush_pending_textures();
+    }
 
     vulkan_texture_t *t = &vulkan_state.textures[texture_index];
     uint32_t atlas_width = ATLAS_SIZE * ATLAS_GRID;
