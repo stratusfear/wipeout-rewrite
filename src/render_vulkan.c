@@ -80,9 +80,8 @@ static PFN_vkCreateSemaphore                        vkCreateSemaphore_fn;
 static PFN_vkDestroySemaphore                       vkDestroySemaphore_fn;
 static PFN_vkCreateFence                            vkCreateFence_fn;
 static PFN_vkDestroyFence                           vkDestroyFence_fn;
-static PFN_vkResetFences                            vkResetFences_fn;
 static PFN_vkWaitForFences                          vkWaitForFences_fn;
-static PFN_vkGetFenceStatus                         vkGetFenceStatus_fn;
+static PFN_vkWaitSemaphores                         vkWaitSemaphores_fn;
 
 /* Command buffer */
 static PFN_vkCreateCommandPool                      vkCreateCommandPool_fn;
@@ -205,12 +204,10 @@ static bool load_device_functions(VkDevice device, VkInstance instance) {
     if (!vkCreateFence_fn) { fprintf(stderr, "Failed to load vkCreateFence\n"); return false; }
     vkDestroyFence_fn = (PFN_vkDestroyFence)load_device_fn(device, instance, "vkDestroyFence");
     if (!vkDestroyFence_fn) { fprintf(stderr, "Failed to load vkDestroyFence\n"); return false; }
-    vkResetFences_fn = (PFN_vkResetFences)load_device_fn(device, instance, "vkResetFences");
-    if (!vkResetFences_fn) { fprintf(stderr, "Failed to load vkResetFences\n"); return false; }
     vkWaitForFences_fn = (PFN_vkWaitForFences)load_device_fn(device, instance, "vkWaitForFences");
     if (!vkWaitForFences_fn) { fprintf(stderr, "Failed to load vkWaitForFences\n"); return false; }
-    vkGetFenceStatus_fn = (PFN_vkGetFenceStatus)load_device_fn(device, instance, "vkGetFenceStatus");
-    if (!vkGetFenceStatus_fn) { fprintf(stderr, "Failed to load vkGetFenceStatus\n"); return false; }
+    vkWaitSemaphores_fn = (PFN_vkWaitSemaphores)load_device_fn(device, instance, "vkWaitSemaphores");
+    if (!vkWaitSemaphores_fn) { fprintf(stderr, "Failed to load vkWaitSemaphores\n"); return false; }
 
     /* Command buffer */
     vkCreateCommandPool_fn = (PFN_vkCreateCommandPool)load_device_fn(device, instance, "vkCreateCommandPool");
@@ -421,12 +418,20 @@ static struct vulkan_state {
     VkFramebuffer *framebuffers;
 
     /* Sync objects:
-     * - image_acquired_semaphores[] indexed by swapchain image (per-image).
+     * - image_acquired_semaphores[] indexed by frame slot (per-frame). Binary —
+     *   VUID-VkAcquireNextImageInfoKHR-semaphore-03266 requires
+     *   VK_SEMAPHORE_TYPE_BINARY for swapchain acquire.
      * - render_complete_semaphores[] indexed by swapchain image (per-image).
-     * - frame_fences[] indexed by frame_index (per-frame, signaled at submit). */
-    VkSemaphore image_acquired_semaphores[16]; /* One per swapchain image */
+     *   Binary — vkQueuePresentKHR only accepts binary semaphores.
+     * - timeline_semaphore replaces the old per-frame fences: each submit
+     *   signals an explicit monotonic value (slot_fence_value[slot]) and
+     *   prepare() CPU-waits on that value for backpressure. Initial value is
+     *   0, so the first wait per slot is a no-op. */
+    VkSemaphore image_acquired_semaphores[MAX_FRAMES_IN_FLIGHT]; /* One per frame slot */
     VkSemaphore render_complete_semaphores[16]; /* One per swapchain image */
-    VkFence frame_fences[MAX_FRAMES_IN_FLIGHT]; /* Per-frame, created signaled, signaled at submit */
+    VkSemaphore timeline_semaphore; /* TIMELINE type, replaces frame fences */
+    uint64_t timeline_next_value; /* Next value to signal on submit (monotonic) */
+    uint64_t slot_fence_value[MAX_FRAMES_IN_FLIGHT]; /* Value each slot's last submit will signal */
     VkCommandPool command_pools[MAX_FRAMES_IN_FLIGHT];
     VkCommandBuffer command_buffers[MAX_FRAMES_IN_FLIGHT];
     VkCommandBuffer command_buffer; /* Working pointer to current frame's CB */
@@ -783,8 +788,8 @@ void render_init(vec2i_t screen_size) {
     LOAD_FN_INSTANCE(vkDestroySemaphore_fn, vkDestroySemaphore)
     LOAD_FN_INSTANCE(vkCreateFence_fn, vkCreateFence)
     LOAD_FN_INSTANCE(vkDestroyFence_fn, vkDestroyFence)
-    LOAD_FN_INSTANCE(vkResetFences_fn, vkResetFences)
     LOAD_FN_INSTANCE(vkWaitForFences_fn, vkWaitForFences)
+    LOAD_FN_INSTANCE(vkWaitSemaphores_fn, vkWaitSemaphores)
 
     /* Command buffer */
     LOAD_FN_INSTANCE(vkCreateCommandPool_fn, vkCreateCommandPool)
@@ -1067,8 +1072,10 @@ void render_init(vec2i_t screen_size) {
         VkSemaphoreCreateInfo semaphore_ci = {0};
         semaphore_ci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
-        /* Per-swapchain-image acquire semaphores (indexed by image) */
-        for (uint32_t i = 0; i < 16; i++) {
+        /* Per-frame-slot acquire semaphores (indexed by frame slot, not image).
+         * Must be binary: VUID-VkAcquireNextImageInfoKHR-semaphore-03266
+         * requires VK_SEMAPHORE_TYPE_BINARY for swapchain acquire. */
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             if (vkCreateSemaphore_fn(vulkan_state.device, &semaphore_ci, NULL,
                                      &vulkan_state.image_acquired_semaphores[i]) != VK_SUCCESS) {
                 fprintf(stderr, "Failed to create acquire semaphore\n");
@@ -1085,18 +1092,22 @@ void render_init(vec2i_t screen_size) {
             }
         }
 
-        /* Per-frame fences (start signaled so the first wait returns
-         * immediately). Used for CPU-side backpressure: reset before
-         * each submit so the GPU can signal it when the frame completes. */
-        VkFenceCreateInfo fence_ci = {0};
-        fence_ci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        fence_ci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        /* Timeline semaphore replacing the old per-frame fences. Initial
+         * value is 0 (so the first backpressure wait per slot is a no-op);
+         * each frame submit signals an explicit monotonic value and prepare()
+         * CPU-waits on it. */
+        VkSemaphoreTypeCreateInfo timeline_ci = {0};
+        timeline_ci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        timeline_ci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        semaphore_ci.pNext = &timeline_ci;
+        if (vkCreateSemaphore_fn(vulkan_state.device, &semaphore_ci, NULL,
+                                 &vulkan_state.timeline_semaphore) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to create timeline semaphore\n");
+            goto cleanup;
+        }
+        vulkan_state.timeline_next_value = 1;
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-            if (vkCreateFence_fn(vulkan_state.device, &fence_ci, NULL,
-                                 &vulkan_state.frame_fences[i]) != VK_SUCCESS) {
-                fprintf(stderr, "Failed to create frame fence\n");
-                goto cleanup;
-            }
+            vulkan_state.slot_fence_value[i] = 0;
         }
     }
 
@@ -1532,8 +1543,8 @@ void render_cleanup(void) {
     destroy_swapchain();
 
     /* Destroy sync objects */
-    /* Image-acquired semaphores: one per swapchain image (16 max) */
-    for (uint32_t i = 0; i < 16; i++) {
+    /* Acquire semaphores: one per frame slot */
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (vulkan_state.image_acquired_semaphores[i] != VK_NULL_HANDLE) {
             vkDestroySemaphore_fn(vulkan_state.device, vulkan_state.image_acquired_semaphores[i], NULL);
             vulkan_state.image_acquired_semaphores[i] = VK_NULL_HANDLE;
@@ -1546,12 +1557,11 @@ void render_cleanup(void) {
             vulkan_state.render_complete_semaphores[i] = VK_NULL_HANDLE;
         }
     }
-    /* Per-frame fences */
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-        if (vulkan_state.frame_fences[i] != VK_NULL_HANDLE) {
-            vkDestroyFence_fn(vulkan_state.device, vulkan_state.frame_fences[i], NULL);
-            vulkan_state.frame_fences[i] = VK_NULL_HANDLE;
-        }
+    /* Timeline semaphore (queue was waited idle above, so no outstanding
+     * signal operations remain) */
+    if (vulkan_state.timeline_semaphore != VK_NULL_HANDLE) {
+        vkDestroySemaphore_fn(vulkan_state.device, vulkan_state.timeline_semaphore, NULL);
+        vulkan_state.timeline_semaphore = VK_NULL_HANDLE;
     }
 
     /* Destroy per-frame command pools */
@@ -3254,25 +3264,24 @@ void render_frame_prepare(void) {
     /* Wait for GPU to finish with previous use of this frame's resources
      * BEFORE re-acquiring this frame slot's semaphore or resetting the
      * command pool. The previous submit for this slot is the only consumer
-     * of image_acquired_semaphores[f]; until its fence signals, that
+     * of image_acquired_semaphores[f]; until that submit completes, the
      * semaphore still has a pending wait and re-acquiring it violates
      * VUID-vkAcquireNextImageKHR-semaphore-01779. Waiting here also
      * prevents the "command buffer in use" cascade that leads to
      * VK_ERROR_DEVICE_LOST.
      *
-     * WAIT ONLY — do NOT reset the fence here. The fence is re-signaled by
-     * this frame's submit in render_frame_end, which resets it first. If we
-     * reset it here while the submit is still ahead of us, frame_end would
-     * see an unsignaled fence and wait on it forever (nothing signals a
-     * fence except the submit that follows the wait). This deadlock shows
-     * up whenever the GPU lags >1 frame behind — e.g. right after a
-     * fullscreen/native-resolution resize. */
-    VkResult fence_st = vkGetFenceStatus_fn(vulkan_state.device,
-                                            vulkan_state.frame_fences[f]);
-    if (fence_st != VK_SUCCESS) {
-        vkWaitForFences_fn(vulkan_state.device, 1,
-                           &vulkan_state.frame_fences[f], VK_TRUE, UINT64_MAX);
-    }
+     * The previous submit for this slot signaled timeline_semaphore at
+     * slot_fence_value[f] (recorded when that submit was issued). Waiting on
+     * that value blocks until the GPU finished it — the same backpressure
+     * the old per-frame fence provided, with no reset to manage. A fresh
+     * slot has slot_fence_value[f] == 0 and the semaphore starts at 0, so
+     * the first wait per slot returns immediately. */
+    VkSemaphoreWaitInfo timeline_wait = {0};
+    timeline_wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    timeline_wait.semaphoreCount = 1;
+    timeline_wait.pSemaphores = &vulkan_state.timeline_semaphore;
+    timeline_wait.pValues = &vulkan_state.slot_fence_value[f];
+    vkWaitSemaphores_fn(vulkan_state.device, &timeline_wait, UINT64_MAX);
 
     /* Acquire next swapchain image, signaling an image-available
      * semaphore.  The semaphore is waited on during submit so the GPU
@@ -3509,45 +3518,53 @@ void render_frame_end(void) {
     /* End command buffer recording */
     vkEndCommandBuffer_fn(vulkan_state.command_buffer);
     /* Submit to queue:
-     * - wait_semaphore = acquire_semaphore[current_image] (ensures the
+     * - wait_semaphore = image_acquired_semaphores[f] (ensures the
      *   presentation engine has finished reading from the image).
-     * - signal_semaphore = render_complete[current_swapchain_image]
-     *   (ensures present waits for GPU to finish rendering).
-     * - fence = frame_fences[frame_index] (CPU-side backpressure). */
+     * - signal semaphores: render_complete_semaphores[img] (ensures present
+     *   waits for GPU to finish rendering) and timeline_semaphore
+     *   (CPU-side backpressure — replaces the old per-frame fence). */
     uint32_t f = vulkan_state.frame_index;
     uint32_t img = vulkan_state.current_swapchain_image;
-    VkSemaphore signal_semaphores[] = {vulkan_state.render_complete_semaphores[img]};
+
+    /* Assign this submit its explicit timeline value. Values increase
+     * monotonically in submit order (queue is FIFO, so signal operations
+     * execute in the same order); prepare() CPU-waits on them for
+     * backpressure. No reset needed — that's the point of a timeline. */
+    uint64_t timeline_value = vulkan_state.timeline_next_value++;
+    vulkan_state.slot_fence_value[f] = timeline_value;
+
+    VkSemaphore signal_semaphores[] = {vulkan_state.render_complete_semaphores[img],
+                                       vulkan_state.timeline_semaphore};
+    /* Parallel to signal_semaphores (VUID-VkSubmitInfo-pNext-03241): the
+     * binary semaphore's value is ignored, the timeline gets the real one. */
+    uint64_t signal_values[] = {0, timeline_value};
+
+    VkTimelineSemaphoreSubmitInfo timeline_submit = {0};
+    timeline_submit.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timeline_submit.signalSemaphoreValueCount = 2; /* == signalSemaphoreCount */
+    timeline_submit.pSignalSemaphoreValues = signal_values;
 
     VkSubmitInfo submit_info = {0};
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.pNext = &timeline_submit;
     submit_info.waitSemaphoreCount = 1;
     submit_info.pWaitSemaphores = &vulkan_state.image_acquired_semaphores[f];
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     submit_info.pWaitDstStageMask = &wait_stage;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &vulkan_state.command_buffer;
-    submit_info.signalSemaphoreCount = 1;
+    submit_info.signalSemaphoreCount = 2;
     submit_info.pSignalSemaphores = signal_semaphores;
 
-    /* Fence management */
-    VkResult fence_st = vkGetFenceStatus_fn(vulkan_state.device,
-                                            vulkan_state.frame_fences[f]);
-    if (fence_st == VK_SUCCESS) {
-        vkResetFences_fn(vulkan_state.device, 1, &vulkan_state.frame_fences[f]);
-    } else {
-        vkWaitForFences_fn(vulkan_state.device, 1,
-                           &vulkan_state.frame_fences[f], VK_TRUE, UINT64_MAX);
-        vkResetFences_fn(vulkan_state.device, 1, &vulkan_state.frame_fences[f]);
-    }
+    vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit_info, VK_NULL_HANDLE);
 
-    vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit_info,
-                     vulkan_state.frame_fences[f]);
-
-    /* Present */
+    /* Present — wait only on the binary render-complete semaphore
+     * (vkQueuePresentKHR does not accept timeline semaphores). */
+    VkSemaphore present_semaphores[] = {vulkan_state.render_complete_semaphores[img]};
     VkPresentInfoKHR present_info = {0};
     present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     present_info.waitSemaphoreCount = 1;
-    present_info.pWaitSemaphores = signal_semaphores;
+    present_info.pWaitSemaphores = present_semaphores;
     present_info.swapchainCount = 1;
 
     VkSwapchainKHR swapchains[] = {vulkan_state.swapchain};
