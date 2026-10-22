@@ -15,6 +15,11 @@ layout(push_constant) uniform PushConstants {
 void main() {
     gl_Position = pc.u_mvp * vec4(a_pos, 1.0);
     gl_Position.xy += pc.u_screen * gl_Position.w;
+    /* The projection is GL-style: NDC z spans [-1,+1] (near -> -1, far -> +1),
+     * but the Vulkan depth buffer is [0,1]. Remap to depth = (z_ndc+1)/2 —
+     * exactly the GL depth values — so near geometry (NDC z < 0) is not
+     * discarded and occlusion matches GL. */
+    gl_Position.z = 0.5 * gl_Position.z + 0.5 * gl_Position.w;
     v_uv = a_uv / 2048.0;
     v_color = a_color;
 }
