@@ -43,9 +43,7 @@ static PFN_vkDestroyInstance                        vkDestroyInstance_fn;
 static PFN_vkEnumeratePhysicalDevices               vkEnumeratePhysicalDevices_fn;
 static PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties_fn;
 static PFN_vkGetPhysicalDeviceProperties            vkGetPhysicalDeviceProperties_fn;
-static PFN_vkGetPhysicalDeviceFeatures               vkGetPhysicalDeviceFeatures_fn;
 static PFN_vkGetPhysicalDeviceFeatures2              vkGetPhysicalDeviceFeatures2_fn;
-static PFN_vkEnumerateDeviceExtensionProperties      vkEnumerateDeviceExtensionProperties_fn;
 static PFN_vkGetPhysicalDeviceSurfaceSupportKHR     vkGetPhysicalDeviceSurfaceSupportKHR_fn;
 static PFN_vkGetPhysicalDeviceSurfaceFormatsKHR     vkGetPhysicalDeviceSurfaceFormatsKHR_fn;
 static PFN_vkGetPhysicalDeviceSurfacePresentModesKHR vkGetPhysicalDeviceSurfacePresentModesKHR_fn;
@@ -707,11 +705,11 @@ void render_init(vec2i_t screen_size) {
 
     VkApplicationInfo app_info = {0};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app_info.apiVersion = VK_MAKE_VERSION(1, 3, 0);
+    app_info.apiVersion = VK_API_VERSION_1_3;
     app_info.pApplicationName = "wipeout-rewrite";
-    app_info.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
+    app_info.applicationVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
     app_info.pEngineName = "wipeout-rewrite";
-    app_info.engineVersion = VK_MAKE_VERSION(0, 1, 0);
+    app_info.engineVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
     instance_ci.pApplicationInfo = &app_info;
 
     VkResult result = vkCreateInstance_fn(&instance_ci, NULL, &vulkan_state.instance);
@@ -728,9 +726,7 @@ void render_init(vec2i_t screen_size) {
     LOAD_FN_INSTANCE(vkEnumeratePhysicalDevices_fn, vkEnumeratePhysicalDevices)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceQueueFamilyProperties_fn, vkGetPhysicalDeviceQueueFamilyProperties)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceProperties_fn, vkGetPhysicalDeviceProperties)
-    LOAD_FN_INSTANCE(vkGetPhysicalDeviceFeatures_fn, vkGetPhysicalDeviceFeatures)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceFeatures2_fn, vkGetPhysicalDeviceFeatures2)
-    LOAD_FN_INSTANCE(vkEnumerateDeviceExtensionProperties_fn, vkEnumerateDeviceExtensionProperties)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceSurfaceSupportKHR_fn, vkGetPhysicalDeviceSurfaceSupportKHR)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceSurfaceFormatsKHR_fn, vkGetPhysicalDeviceSurfaceFormatsKHR)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceSurfacePresentModesKHR_fn, vkGetPhysicalDeviceSurfacePresentModesKHR)
@@ -950,20 +946,16 @@ void render_init(vec2i_t screen_size) {
     queue_ci.queueCount = 1;
     queue_ci.pQueuePriorities = &queue_priority;
 
-    /* Query device features. samplerAnisotropy is required by the atlas
-     * sampler (anisotropyEnable); it is a core 1.0 feature supported by
-     * every conformant driver. */
-    VkPhysicalDeviceFeatures device_features = {0};
-    vkGetPhysicalDeviceFeatures_fn(vulkan_state.physical_device, &device_features);
-
-    /* Vulkan 1.3 features, enabled up front so the later modernization
-     * steps (timeline semaphores, synchronization2, extended dynamic
-     * state, dynamic rendering) can use them without another
-     * device-creation change. All five are mandatory on any conformant 1.3
-     * implementation; query first and fail with a named error if the driver
-     * lies about its version. Note the EDS feature structs keep their EXT
-     * names/sTypes even in 1.3 — only the commands and VkDynamicState values
-     * were promoted to core. */
+    /* Device features, queried and enabled through the single 1.3 path:
+     * the v1 feature set (features2.features — samplerAnisotropy is required
+     * by the atlas sampler's anisotropyEnable) rides along with the five 1.3
+     * feature structs below, so the later modernization steps (timeline
+     * semaphores, synchronization2, extended dynamic state, dynamic
+     * rendering) need no further device-creation change. All of it is
+     * mandatory on any conformant 1.3 implementation; query first and fail
+     * with a named error if the driver lies about its version. Note the EDS
+     * feature structs keep their EXT names/sTypes even in 1.3 — only the
+     * commands and VkDynamicState values were promoted to core. */
     VkPhysicalDeviceExtendedDynamicState2FeaturesEXT feat_eds2 = {0};
     feat_eds2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT;
     VkPhysicalDeviceDynamicRenderingFeatures feat_dyn_render = {0};
@@ -1022,8 +1014,7 @@ void render_init(vec2i_t screen_size) {
     device_ci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     device_ci.queueCreateInfoCount = 1;
     device_ci.pQueueCreateInfos = &queue_ci;
-    device_ci.pEnabledFeatures = &device_features;
-    device_ci.pNext = &feat_timeline;
+    device_ci.pNext = &features2;
     device_ci.enabledExtensionCount = 1;
     device_ci.ppEnabledExtensionNames = device_exts;
     device_ci.enabledLayerCount = 0;
