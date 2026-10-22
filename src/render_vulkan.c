@@ -459,7 +459,13 @@ static struct vulkan_state {
     uint32_t vertex_count;
     uint32_t vertex_flushed; /* vertices already uploaded+drawn this frame */
     vertex_t *vertex_data; /* host-side staging */
-    #define RENDER_TRIS_BUFFER_CAPACITY 16384
+    /* Per-frame triangle capacity. The buffer is cumulative (a frame's draws
+     * all reference one growing region that stays live until the frame's
+     * submit completes), so this bounds the WHOLE frame, not a single flush —
+     * unlike the GL renderer, whose 2048-triangle limit applies per flush.
+     * Sized 8x the old value so a busy frame that draws fine in GL can't
+     * overflow it; the drop path below still warns if it ever does. */
+    #define RENDER_TRIS_BUFFER_CAPACITY 131072
 
     /* Reusable staging buffer for texture uploads (avoids per-upload 16MB alloc) */
     VkBuffer upload_staging_buffer;
@@ -3756,8 +3762,16 @@ void render_push_tris(tris_t tris, uint16_t texture_index) {
     if (vulkan_state.vertex_count + 3 > RENDER_TRIS_BUFFER_CAPACITY * 3) {
         render_flush();
         /* Flush is cumulative (it never frees space); drop overflow triangles
-         * so we never write past the end of vertex_data. */
+         * so we never write past the end of vertex_data. Warn once so an
+         * oversized frame is visible instead of silently losing geometry. */
         if (vulkan_state.vertex_count + 3 > RENDER_TRIS_BUFFER_CAPACITY * 3) {
+            static bool vertex_overflow_warned = false;
+            if (!vertex_overflow_warned) {
+                vertex_overflow_warned = true;
+                fprintf(stderr, "vertex buffer overflow: dropping triangles "
+                                "(%u triangles this frame, capacity %d)\n",
+                        vulkan_state.vertex_count / 3, RENDER_TRIS_BUFFER_CAPACITY);
+            }
             return;
         }
     }
