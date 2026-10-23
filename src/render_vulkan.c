@@ -795,11 +795,23 @@ void render_init(vec2i_t screen_size) {
         goto cleanup;
     }
 
-    /* Max sampler anisotropy for the atlas sampler (mirrors GL's
-     * GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT; the VkSampler field clamps at 16). */
+    /* The instance's apiVersion (requested as 1.3 above) does not constrain
+     * the devices a conformant loader may expose: pre-1.3 devices can still
+     * be listed, and on one of those the core 1.3 entry points this app
+     * calls (vkCmdBeginRendering, vkCmdSetCullMode, ...) do not exist. Fail
+     * with a named error instead of hitting NULL dispatch later. */
     {
         VkPhysicalDeviceProperties pd_props = {0};
         vkGetPhysicalDeviceProperties_fn(vulkan_state.physical_device, &pd_props);
+        if (pd_props.apiVersion < VK_API_VERSION_1_3) {
+            fprintf(stderr, "Selected device reports Vulkan %u.%u.%u; this app requires 1.3\n",
+                    VK_API_VERSION_MAJOR(pd_props.apiVersion),
+                    VK_API_VERSION_MINOR(pd_props.apiVersion),
+                    VK_API_VERSION_PATCH(pd_props.apiVersion));
+            goto cleanup;
+        }
+        /* Max sampler anisotropy for the atlas sampler (mirrors GL's
+         * GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT; the VkSampler field clamps at 16). */
         vulkan_state.max_anisotropy = pd_props.limits.maxSamplerAnisotropy > 16.0f ?
             16.0f : pd_props.limits.maxSamplerAnisotropy;
     }
@@ -854,24 +866,22 @@ void render_init(vec2i_t screen_size) {
     queue_ci.pQueuePriorities = &queue_priority;
 
     /* Device features, enabled through the single 1.3 path. Timeline
-     * semaphores, synchronization2 and dynamic rendering are core (mandatory)
-     * in 1.3; extended dynamic state 1/2 are core in 1.4 and on a 1.3 device
-     * come from the VK_EXT_extended_dynamic_state{,2} extensions — optional
-     * for 1.3 conformance, but mandatory of anything reporting 1.4+ and
-     * universally supported by current drivers. All five are queried below
-     * and any missing one fails with a named error. Note the EDS feature
-     * structs keep their EXT names/sTypes even in 1.4 — only the commands and
-     * VkDynamicState values were promoted to core. The v1 feature set is
-     * enabled minimally (see below): only samplerAnisotropy, which the atlas
-     * sampler's anisotropyEnable requires. */
-    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT feat_eds2 = {0};
-    feat_eds2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT;
+     * semaphores (core since 1.2), synchronization2, dynamic rendering and
+     * extended dynamic state 1 are all core (mandatory) in 1.3 — the
+     * VK_VERSION_1_3 promotion makes every VK_EXT_extended_dynamic_state
+     * command and VkDynamicState enumerant required in 1.3 (EDS2 was only
+     * partially promoted and is not used here). All four are queried below
+     * and any missing one fails with a named error; on a device reporting
+     * 1.3+ the query cannot spuriously report them absent. The EDS feature
+     * structs keep their EXT names/sTypes even when core — only the commands
+     * and VkDynamicState values were promoted. The v1 feature set is enabled
+     * minimally (see below): only samplerAnisotropy, which the atlas sampler's
+     * anisotropyEnable requires. */
     VkPhysicalDeviceDynamicRenderingFeatures feat_dyn_render = {0};
     feat_dyn_render.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
-    feat_eds2.pNext = &feat_dyn_render;
     VkPhysicalDeviceExtendedDynamicStateFeaturesEXT feat_eds = {0};
     feat_eds.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT;
-    feat_eds.pNext = &feat_eds2;
+    feat_eds.pNext = &feat_dyn_render;
     VkPhysicalDeviceSynchronization2Features feat_sync2 = {0};
     feat_sync2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
     feat_sync2.pNext = &feat_eds;
@@ -909,20 +919,15 @@ void render_init(vec2i_t screen_size) {
         fprintf(stderr, "Vulkan 1.3 driver missing required feature: extendedDynamicState\n");
         goto cleanup;
     }
-    if (!feat_eds2.extendedDynamicState2) {
-        fprintf(stderr, "Vulkan 1.3 driver missing required feature: extendedDynamicState2\n");
-        goto cleanup;
-    }
     if (!feat_dyn_render.dynamicRendering) {
         fprintf(stderr, "Vulkan 1.3 driver missing required feature: dynamicRendering\n");
         goto cleanup;
     }
 
-    /* All five are guaranteed supported by the checks above — enable them. */
+    /* All four are guaranteed supported by the checks above — enable them. */
     feat_timeline.timelineSemaphore = VK_TRUE;
     feat_sync2.synchronization2 = VK_TRUE;
     feat_eds.extendedDynamicState = VK_TRUE;
-    feat_eds2.extendedDynamicState2 = VK_TRUE;
     feat_dyn_render.dynamicRendering = VK_TRUE;
 
     /* The game-pass pipelines use core 1.0 dynamic states (viewport, scissor,
