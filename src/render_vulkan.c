@@ -4175,6 +4175,14 @@ vec2i_t render_texture_size(uint16_t texture_index) {
     return vulkan_state.textures[texture_index].size;
 }
 
+/* Ordering note (vs GL): glTexSubImage2D takes effect in command order, so
+ * in GL a draw recorded before the replace sees the old pixels. Here the
+ * replace submits its own upload command buffer to the graphics queue and
+ * waits for it, so any draw already recorded earlier in the same frame
+ * would sample the NEW pixels when the frame executes. That case never
+ * occurs in this game: the sole caller (intro.c video_cb, fired by
+ * plm_decode in intro_update) always runs before intro_update's
+ * render_push_2d of the same texture. */
 void render_texture_replace_pixels(int16_t texture_index, rgba_t *pixels) {
     error_if((uint16_t)texture_index >= vulkan_state.textures_len, "Invalid texture %d", texture_index);
 
