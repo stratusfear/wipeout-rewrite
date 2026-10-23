@@ -2781,43 +2781,42 @@ static bool create_pipelines(void) {
         return false;
     }
 
-    /* --- Game pipelines: one per blend mode. Depth test/write and cull mode
-     * are dynamic state (see game_pipelines); render_flush issues the
-     * matching vkCmdSet* after each bind. --- */
+    /* --- Game pipelines: one per blend mode. The vertex and fragment
+     * shaders are identical across blend modes — the two pipelines differ
+     * only in blend state, set in create_game_pipeline — so both share a
+     * single shader pair. Depth test/write and cull mode are dynamic state
+     * (see game_pipelines); render_flush issues the matching vkCmdSet*
+     * after each bind. --- */
     {
-        VkShaderModule vert = load_shader_module("shaders/normal.vert.spvasrc.spv");
-        VkShaderModule frag = load_shader_module("shaders/normal.frag.spvasrc.spv");
+        VkShaderModule vert = load_shader_module("shaders/game.vert.spvasrc.spv");
+        VkShaderModule frag = load_shader_module("shaders/game.frag.spvasrc.spv");
         if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE) {
-            fprintf(stderr, "Failed to load normal shaders\n");
+            fprintf(stderr, "Failed to load game shaders\n");
             vkDestroyShaderModule_fn(vulkan_state.device, vert, NULL);
             vkDestroyShaderModule_fn(vulkan_state.device, frag, NULL);
             return false;
         }
+
         vulkan_state.game_pipelines[RENDER_BLEND_NORMAL] = create_game_pipeline(vert, frag, true);
-        vkDestroyShaderModule_fn(vulkan_state.device, vert, NULL);
-        vkDestroyShaderModule_fn(vulkan_state.device, frag, NULL);
         if (vulkan_state.game_pipelines[RENDER_BLEND_NORMAL] == VK_NULL_HANDLE) {
             fprintf(stderr, "Failed to create normal pipeline\n");
-            return false;
-        }
-    }
-
-    {
-        VkShaderModule vert = load_shader_module("shaders/lighter.vert.spvasrc.spv");
-        VkShaderModule frag = load_shader_module("shaders/lighter.frag.spvasrc.spv");
-        if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE) {
-            fprintf(stderr, "Failed to load lighter shaders\n");
             vkDestroyShaderModule_fn(vulkan_state.device, vert, NULL);
             vkDestroyShaderModule_fn(vulkan_state.device, frag, NULL);
             return false;
         }
+
         vulkan_state.game_pipelines[RENDER_BLEND_LIGHTER] = create_game_pipeline(vert, frag, false);
-        vkDestroyShaderModule_fn(vulkan_state.device, vert, NULL);
-        vkDestroyShaderModule_fn(vulkan_state.device, frag, NULL);
         if (vulkan_state.game_pipelines[RENDER_BLEND_LIGHTER] == VK_NULL_HANDLE) {
             fprintf(stderr, "Failed to create lighter pipeline\n");
+            vkDestroyShaderModule_fn(vulkan_state.device, vert, NULL);
+            vkDestroyShaderModule_fn(vulkan_state.device, frag, NULL);
             return false;
         }
+
+        /* Both pipelines captured the compiled shaders; the modules are no
+         * longer needed. */
+        vkDestroyShaderModule_fn(vulkan_state.device, vert, NULL);
+        vkDestroyShaderModule_fn(vulkan_state.device, frag, NULL);
     }
 
     /* --- Post pipelines (fullscreen quad, no depth, no blend).

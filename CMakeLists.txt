@@ -235,10 +235,8 @@ elseif("${RENDERER}" STREQUAL "VULKAN")
 	
 	# Compile GLSL shaders to SPIR-V
 	set(SHADER_SOURCES
-		src/shaders/normal.vert.spvasrc
-		src/shaders/normal.frag.spvasrc
-		src/shaders/lighter.vert.spvasrc
-		src/shaders/lighter.frag.spvasrc
+		src/shaders/game.vert.spvasrc
+		src/shaders/game.frag.spvasrc
 		src/shaders/post.vert.spvasrc
 		src/shaders/post.frag.spvasrc
 		src/shaders/post_crt.frag.spvasrc
