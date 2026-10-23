@@ -61,6 +61,7 @@ static PFN_vkGetPhysicalDeviceSurfaceSupportKHR     vkGetPhysicalDeviceSurfaceSu
 static PFN_vkGetPhysicalDeviceSurfaceFormatsKHR     vkGetPhysicalDeviceSurfaceFormatsKHR_fn;
 static PFN_vkGetPhysicalDeviceSurfacePresentModesKHR vkGetPhysicalDeviceSurfacePresentModesKHR_fn;
 static PFN_vkGetPhysicalDeviceMemoryProperties       vkGetPhysicalDeviceMemoryProperties_fn;
+static PFN_vkGetPhysicalDeviceFormatProperties        vkGetPhysicalDeviceFormatProperties_fn;
 static PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR vkGetPhysicalDeviceSurfaceCapabilitiesKHR_fn;
 static PFN_vkCreateDevice                           vkCreateDevice_fn;
 static PFN_vkDestroyDevice                          vkDestroyDevice_fn;
@@ -741,6 +742,7 @@ void render_init(vec2i_t screen_size) {
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceSurfaceFormatsKHR_fn, vkGetPhysicalDeviceSurfaceFormatsKHR)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceSurfacePresentModesKHR_fn, vkGetPhysicalDeviceSurfacePresentModesKHR)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceMemoryProperties_fn, vkGetPhysicalDeviceMemoryProperties)
+    LOAD_FN_INSTANCE(vkGetPhysicalDeviceFormatProperties_fn, vkGetPhysicalDeviceFormatProperties)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceSurfaceCapabilitiesKHR_fn, vkGetPhysicalDeviceSurfaceCapabilitiesKHR)
     LOAD_FN_INSTANCE(vkCreateDevice_fn, vkCreateDevice)
     LOAD_FN_INSTANCE(vkDestroyDevice_fn, vkDestroyDevice)
@@ -1115,6 +1117,21 @@ void render_init(vec2i_t screen_size) {
         }
     }
 
+
+    /* The backbuffer depth image and the game render pass hardcode
+     * VK_FORMAT_D32_SFLOAT (depth image, view, and depthAttachmentFormat).
+     * Query the physical device instead of assuming: conformant Vulkan 1.3
+     * devices support it, but if not, fail loudly here with a named error
+     * rather than a cryptic vkCreateImage failure deep in backbuffer setup. */
+    {
+        VkFormatProperties format_props;
+        vkGetPhysicalDeviceFormatProperties_fn(vulkan_state.physical_device,
+                                               VK_FORMAT_D32_SFLOAT, &format_props);
+        if ((format_props.optimalTilingFeatures &
+             VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0) {
+            die("Device does not support VK_FORMAT_D32_SFLOAT as a depth/stencil attachment");
+        }
+    }
 
     /* -- 16. Create backbuffer (off-screen render target) --
      * render_res is NATIVE by default (zero-init), so the backbuffer tracks
