@@ -12,6 +12,10 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 // POST (none): plain copy, mirrors GL SHADER_POST_FS_DEFAULT.
+// The backbuffer is upright (negative-height game viewport: scene top -> row 0),
+// and the quad's v_uv.y=1 at the top of the window, so sample with
+// (v_uv.x, 1.0 - v_uv.y) to copy it through unchanged: window top -> v=0 ->
+// backbuffer row 0 (scene top), window bottom -> v=1 -> backbuffer row H.
 void main() {
-    out_color = texture(u_scene, v_uv);
+    out_color = texture(u_scene, vec2(v_uv.x, 1.0 - v_uv.y));
 }

@@ -1301,8 +1301,14 @@ void render_init(vec2i_t screen_size) {
     {
         float quad_vertices[] = {
             /* pos.x, pos.y, uv.x, uv.y */
-            /* Vulkan backbuffer: scene top renders to image row 0 (v=0), so the
-             * top of the window must sample v=0 (GL sampled v=1 for its top). */
+            /* The negative-height game viewport renders the scene upright into
+             * the backbuffer (scene top -> image row 0, GL orientation). The
+             * post vertex shader passes a_uv through and the post viewport is
+             * positive, so v_uv.y=1 at the top of the window and 0 at the
+             * bottom. The post fragment shader therefore samples
+             * vec2(v_uv.x, 1.0 - v_uv.y): window top -> v=0 -> backbuffer row
+             * 0 (scene top), window bottom -> v=1 -> backbuffer row H (scene
+             * bottom) — an identity copy of the already-upright backbuffer. */
              1.0f,  1.0f, 1.0f, 0.0f,
             -1.0f,  1.0f, 0.0f, 0.0f,
             -1.0f, -1.0f, 0.0f, 1.0f,
@@ -2628,9 +2634,10 @@ static VkPipeline create_post_pipeline(VkShaderModule vert, const char *frag_spv
  * cull mode are dynamic state (extendedDynamicState, Vulkan 1.3 core), so
  * the static values below are ignored and render_flush issues vkCmdSet*
  * after the bind; only front face and depth compare op stay static. Front
- * face is always CLOCKWISE in the game pass: the backbuffer is vertically
- * flipped relative to the presented image, which reverses triangle winding,
- * so VK_CULL_MODE_BACK_BIT culls true back-faces (mirrors GL
+ * face is always COUNTER_CLOCKWISE in the game pass: the negative-height
+ * viewport renders the scene upright (NDC y=+1 -> window top, no flip), so
+ * a front face is COUNTER_CLOCKWISE in window pixel coords and
+ * VK_CULL_MODE_BACK_BIT culls true back-faces (mirrors GL
  * glFrontFace(GL_CCW) + glCullFace(GL_BACK)). Depth bias stays dynamic too
  * (vkCmdSetDepthBias). */
 static VkPipeline create_game_pipeline(VkShaderModule vert, VkShaderModule frag,
@@ -2675,10 +2682,14 @@ static VkPipeline create_game_pipeline(VkShaderModule vert, VkShaderModule frag,
     ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
+    /* Static placeholder — VIEWPORT is dynamic and render_frame_prepare /
+     * render_flush re-issue it every frame. Match the negative-height game
+     * viewport (NDC y=+1 -> window top) so the declared state agrees with
+     * what is actually rendered. */
     VkViewport viewport = {0};
-    viewport.x = 0; viewport.y = 0;
+    viewport.x = 0; viewport.y = (float)vulkan_state.backbuffer_size.y;
     viewport.width = (float)vulkan_state.backbuffer_size.x;
-    viewport.height = (float)vulkan_state.backbuffer_size.y;
+    viewport.height = -(float)vulkan_state.backbuffer_size.y;
     viewport.minDepth = 0.0f; viewport.maxDepth = 1.0f;
 
     VkRect2D scissor = {0};
@@ -2700,7 +2711,11 @@ static VkPipeline create_game_pipeline(VkShaderModule vert, VkShaderModule frag,
     rast.polygonMode = VK_POLYGON_MODE_FILL;
     /* Dynamic (see below) — the static value is ignored, keep it valid. */
     rast.cullMode = VK_CULL_MODE_NONE;
-    rast.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    /* The negative-height game viewport maps NDC y=+1 to the top of the
+     * backbuffer (no vertical flip), so a front face (CCW in the GL
+     * reference) is COUNTER_CLOCKWISE in window pixel coords — matching GL's
+     * glFrontFace(GL_CCW). See the winding note in render_flush. */
+    rast.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rast.depthBiasEnable = VK_TRUE;
     rast.lineWidth = 1.0f;
 
@@ -2734,7 +2749,7 @@ static VkPipeline create_game_pipeline(VkShaderModule vert, VkShaderModule frag,
 
     /* Core 1.0 dynamic states plus the extended dynamic states for depth
      * test/write and cull mode (extendedDynamicState, Vulkan 1.3 core).
-     * Front face stays static CLOCKWISE (see above). */
+     * Front face stays static COUNTER_CLOCKWISE (see above). */
     VkPipelineDynamicStateCreateInfo dyn = {0};
     dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
     dyn.dynamicStateCount = 6;
@@ -3214,10 +3229,16 @@ void render_frame_prepare(void) {
     rendering_info.pDepthAttachment = &depth_attachment;
     vkCmdBeginRendering_fn(vulkan_state.command_buffer, &rendering_info);
 
-    /* Viewport & scissor (dynamic) */
+    /* Viewport & scissor (dynamic). Negative-height viewport: NDC y=+1 maps
+     * to window y=0 (the TOP of the backbuffer) and NDC y=-1 to y=H, so the
+     * game pass renders the scene upright — GL's orientation — with no flip.
+     * The rendered window-y range is still [0,H], so the scissor stays
+     * (0,0,W,H). See the winding note in render_flush for the front-face
+     * consequence (front face becomes COUNTER_CLOCKWISE). */
     VkViewport vp = {0};
+    vp.y      = (float)vulkan_state.backbuffer_size.y;
     vp.width  = (float)vulkan_state.backbuffer_size.x;
-    vp.height = (float)vulkan_state.backbuffer_size.y;
+    vp.height = -(float)vulkan_state.backbuffer_size.y;
     vp.maxDepth = 1.0f;
     vkCmdSetViewport_fn(vulkan_state.command_buffer, 0, 1, &vp);
 
@@ -3521,9 +3542,12 @@ void render_flush(void) {
         rendering_info.pDepthAttachment = &depth_attachment;
         vkCmdBeginRendering_fn(vulkan_state.command_buffer, &rendering_info);
 
+        /* Re-issue the negative-height game viewport (see render_frame_prepare):
+         * NDC y=+1 -> window y=0 (top), scene upright in the backbuffer. */
         VkViewport vp = {0};
+        vp.y      = (float)vulkan_state.backbuffer_size.y;
         vp.width  = (float)vulkan_state.backbuffer_size.x;
-        vp.height = (float)vulkan_state.backbuffer_size.y;
+        vp.height = -(float)vulkan_state.backbuffer_size.y;
         vp.maxDepth = 1.0f;
         vkCmdSetViewport_fn(vulkan_state.command_buffer, 0, 1, &vp);
 
@@ -3562,8 +3586,9 @@ void render_flush(void) {
     float push_constants[18] = {0};
     for (int i = 0; i < 16; i++) push_constants[i] = mvp.m[i];
     /* u_screen is a clip-space position OFFSET (see GL reference: screen uniform
-     * defaults to (0,0), set via render_set_screen_position). y is negated to
-     * match GL's bottom-left origin convention (both APIs share NDC y+1 = top). */
+     * defaults to (0,0), set via render_set_screen_position). GL negates y in
+     * its setter (glUniform2f(..., pos.x, -pos.y)); we push the identical
+     * (s.x, -s.y) so the offset matches the GL reference exactly. */
     push_constants[16] = (float)vulkan_state.current_screen_position.x;
     push_constants[17] = -(float)vulkan_state.current_screen_position.y;
 
@@ -3583,8 +3608,9 @@ void render_flush(void) {
 
     /* Bind pipeline: blend mode selects the shader/blend variant. Depth
      * test/write and cull mode are dynamic state (see game_pipelines) and
-     * are issued right after the bind. Front face is always CLOCKWISE
-     * (baked into both variants). Mirrors the GL reference's
+     * are issued right after the bind. Front face is always
+     * COUNTER_CLOCKWISE (baked into both variants, matching the
+     * negative-viewport upright backbuffer). Mirrors the GL reference's
      * glEnable/glDisable(GL_DEPTH_TEST), glDepthMask and
      * glEnable/glDisable(GL_CULL_FACE). */
     vkCmdBindPipeline_fn(vulkan_state.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -3629,17 +3655,19 @@ void render_flush(void) {
                         vulkan_state.current_depth_bias != 0.0f ? 1.0f : 0.0f,
                         0.0f,
                         vulkan_state.current_depth_bias);
-    /* The game pass renders into the backbuffer, which is vertically flipped
-     * relative to the final (presented) image. The projection matrices are
-     * identical to the GL renderer (no y flip in the matrices or the vertex
-     * shaders); the flip is inherent to Vulkan's viewport (NDC y=+1 maps to
-     * the bottom of the image, vs GL's top). The post pass un-flips it.
+    /* The game pass renders into the backbuffer with a negative-height
+     * viewport, so NDC y=+1 maps to the TOP of the backbuffer (window y=0)
+     * and NDC y=-1 to the bottom — GL's orientation, upright with no flip.
+     * The projection matrices are identical to the GL renderer (no y flip in
+     * the matrices or the vertex shaders); the negative viewport provides the
+     * upright mapping directly, and the post pass copies the backbuffer with
+     * an identity sample.
      *
-     * A vertical flip reverses triangle winding, so a triangle that is
-     * front-facing (CCW) in the GL reference appears clockwise in the
-     * backbuffer. Every game-pipeline variant therefore bakes in
-     * VK_FRONT_FACE_CLOCKWISE so that VK_CULL_MODE_BACK_BIT culls true
-     * back-faces, matching GL's glFrontFace(GL_CCW) + glCullFace(GL_BACK). */
+     * Because the backbuffer is upright (not vertically flipped), a triangle
+     * that is front-facing (CCW) in the GL reference is also COUNTER_CLOCKWISE
+     * in window pixel coords here. Every game-pipeline variant therefore bakes
+     * in VK_FRONT_FACE_COUNTER_CLOCKWISE so that VK_CULL_MODE_BACK_BIT culls
+     * true back-faces, matching GL's glFrontFace(GL_CCW) + glCullFace(GL_BACK). */
 
     /* Draw only the new slice (cumulative buffer holds the whole frame so far) */
     vkCmdDraw_fn(vulkan_state.command_buffer, flushed_count, 1, vulkan_state.vertex_flushed, 0);
