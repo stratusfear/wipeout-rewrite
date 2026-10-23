@@ -580,30 +580,11 @@ static render_stats_t end_stats = {0};
 /* Helper: compute MVP = projection * view * model                      */
 /* ------------------------------------------------------------------ */
 static mat4_t compute_mvp(void) {
-    mat4_t mvp = vulkan_state.current_view_mat;
-    mat4_t tmp = vulkan_state.current_model_mat;
-
-    /* Multiply: mvp = view * model */
-    mat4_t result = mat4_identity();
-    for (int i = 0; i < 4; i++)
-        for (int j = 0; j < 4; j++) {
-            float sum = 0;
-            for (int k = 0; k < 4; k++)
-                sum += mvp.m[k * 4 + j] * tmp.m[i * 4 + k];
-            result.m[i * 4 + j] = sum;
-        }
-
-    /* Multiply: mvp = projection * (view * model) */
+    mat4_t view_model;
+    mat4_mul(&view_model, &vulkan_state.current_view_mat, &vulkan_state.current_model_mat);
     mat4_t proj = vulkan_state.current_is_3d ? vulkan_state.projection_mat_3d : vulkan_state.projection_mat_2d;
-    mat4_t final = mat4_identity();
-    for (int i = 0; i < 4; i++)
-        for (int j = 0; j < 4; j++) {
-            float sum = 0;
-            for (int k = 0; k < 4; k++)
-                sum += proj.m[k * 4 + j] * result.m[i * 4 + k];
-            final.m[i * 4 + j] = sum;
-        }
-
+    mat4_t final;
+    mat4_mul(&final, &proj, &view_model);
     return final;
 }
 
@@ -2642,11 +2623,31 @@ static VkPipeline create_post_pipeline(VkShaderModule vert, const char *frag_spv
  * (vkCmdSetDepthBias). */
 static VkPipeline create_game_pipeline(VkShaderModule vert, VkShaderModule frag,
                                        bool alpha_blend) {
+    /* Distance fade distances from the C-side defines (same values the GL
+     * renderer passes to its `fade` uniform), declared as specialization
+     * constants in game.vert. The stage takes a single VkSpecializationInfo;
+     * both map entries read from the same pData buffer at their offsets. */
+    float fade_vals[2] = {RENDER_FADEOUT_NEAR, RENDER_FADEOUT_FAR};
+    VkSpecializationMapEntry spec_map[2] = {0};
+    spec_map[0].constantID = 0;
+    spec_map[0].offset = 0;
+    spec_map[0].size = 4;
+    spec_map[1].constantID = 1;
+    spec_map[1].offset = 4;
+    spec_map[1].size = 4;
+    VkSpecializationInfo spec_info = {0};
+    spec_info.mapEntryCount = 2;
+    spec_info.pMapEntries = spec_map;
+    spec_info.pData = fade_vals;
+    spec_info.dataSize = 8;
+
     VkPipelineShaderStageCreateInfo stages[2] = {0};
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
     stages[0].module = vert;
     stages[0].pName = "main";
+    /* Only the vertex shader uses the fade specialization constants. */
+    stages[0].pSpecializationInfo = &spec_info;
     stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
     stages[1].module = frag;
@@ -2819,13 +2820,14 @@ static bool create_pipelines(void) {
     layout_ci.pSetLayouts = &vulkan_state.descriptor_set_layout;
 
     /* Single push constant range covering all shader stages.
-     * Game pass push block: mat4 u_mvp (64) + vec2 u_screen (8) = 72 bytes.
+     * Game pass push block: mat4 u_mvp (64) + 3x vec4 view*model rows (48)
+     * + vec2 u_screen (8) = 120 bytes.
      * Post pass push block: vec2 u_resolution (8) + float u_time (4) = 12 bytes.
-     * Both fit within this single 72-byte range. */
+     * Both fit within this single 120-byte range. */
     VkPushConstantRange push_range = {0};
     push_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     push_range.offset = 0;
-    push_range.size = 72; /* 64 (MVP) + 8 (screen) */
+    push_range.size = 120; /* 64 (MVP) + 48 (view*model rows) + 8 (screen) */
 
     VkPushConstantRange push_ranges[1] = {push_range};
     layout_ci.pushConstantRangeCount = 1;
@@ -3580,21 +3582,31 @@ void render_flush(void) {
 
     /* Compute MVP matrix */
     mat4_t mvp = compute_mvp();
+    mat4_t mv;
+    mat4_mul(&mv, &vulkan_state.current_view_mat, &vulkan_state.current_model_mat);
 
-    /* Push MVP + screen (72 bytes)
-     * Shader layout: mat4(64) + vec2(8) = 72 */
-    float push_constants[18] = {0};
+    /* Push MVP + view*model rows + screen (120 bytes)
+     * Shader layout: mat4(64) + 3x vec4(48) + vec2(8) = 120 */
+    float push_constants[30] = {0};
     for (int i = 0; i < 16; i++) push_constants[i] = mvp.m[i];
+    /* u_mv_rowN: row N of view*model (column-major m[col*4+row], so row r is
+     * {m[r], m[4+r], m[8+r], m[12+r]}). game.vert uses the rows to compute
+     * the view-space distance for the GL-style fadeout. For 2D draws
+     * (render_set_view_2d) view and model are identity, so the rows encode an
+     * identity transform and the fade is a no-op there. */
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 4; c++)
+            push_constants[16 + r * 4 + c] = mv.m[c * 4 + r];
     /* u_screen is a clip-space position OFFSET (see GL reference: screen uniform
      * defaults to (0,0), set via render_set_screen_position). GL negates y in
      * its setter (glUniform2f(..., pos.x, -pos.y)); we push the identical
      * (s.x, -s.y) so the offset matches the GL reference exactly. */
-    push_constants[16] = (float)vulkan_state.current_screen_position.x;
-    push_constants[17] = -(float)vulkan_state.current_screen_position.y;
+    push_constants[28] = (float)vulkan_state.current_screen_position.x;
+    push_constants[29] = -(float)vulkan_state.current_screen_position.y;
 
     vkCmdPushConstants_fn(vulkan_state.command_buffer, vulkan_state.pipeline_layout,
                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                          0, 72, push_constants);
+                          0, 120, push_constants);
 
     /* Bind atlas descriptor set */
     VkDescriptorSet desc_sets[1] = {vulkan_state.atlas_descriptor_set};

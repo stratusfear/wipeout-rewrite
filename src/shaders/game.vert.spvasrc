@@ -9,8 +9,17 @@ layout(location = 1) out vec4 v_color;
 
 layout(push_constant) uniform PushConstants {
     mat4 u_mvp;
+    vec4 u_mv_row0;
+    vec4 u_mv_row1;
+    vec4 u_mv_row2;
     vec2 u_screen;
 } pc;
+
+/* Fadeout distances in world units, set at pipeline creation from the
+ * RENDER_FADEOUT_NEAR/FAR defines (render_vulkan.c) — the same values the
+ * GL renderer passes to its `fade` uniform. */
+layout(constant_id = 0) const float FADE_NEAR = 48000.0;
+layout(constant_id = 1) const float FADE_FAR = 64000.0;
 
 void main() {
     gl_Position = pc.u_mvp * vec4(a_pos, 1.0);
@@ -23,4 +32,20 @@ void main() {
     /* a_uv arrives pre-normalized to [0,1] by render_push_tris. */
     v_uv = a_uv;
     v_color = a_color;
+    /* Distance fadeout (GL reference: SHADER_GAME_VS in render_gl.c):
+     *     v_color.a *= smoothstep(fade.y, fade.x,
+     *         length(vec4(camera_pos, 1.0) - model * vec4(pos, 1.0)));
+     * with fade = (FADE_NEAR, FADE_FAR). The view matrix is a rigid
+     * transform, so |view*model*pos| == |model*pos - camera_pos| — u_mv_row0..2
+     * are the top three rows of view*model, pushed by render_flush. The
+     * explicit polynomial form is what GL's smoothstep evaluates to here (its
+     * edge0 > edge1 argument order is technically undefined in GLSL). For 2D
+     * draws the rows are identity, so d = |pos| stays far below FADE_NEAR and
+     * the alpha is unchanged. */
+    vec4 wp = vec4(a_pos, 1.0);
+    float d = length(vec3(dot(pc.u_mv_row0, wp),
+                          dot(pc.u_mv_row1, wp),
+                          dot(pc.u_mv_row2, wp)));
+    float t = clamp((d - FADE_FAR) / (FADE_NEAR - FADE_FAR), 0.0, 1.0);
+    v_color.a *= t * t * (3.0 - 2.0 * t);
 }
