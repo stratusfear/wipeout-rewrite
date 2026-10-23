@@ -1544,7 +1544,10 @@ void render_cleanup(void) {
 /* Memory type helper                                                  */
 /* ------------------------------------------------------------------ */
 
-static uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t type_filter, VkMemoryPropertyFlags properties) {
+/* Quiet variant: returns UINT32_MAX on no match without logging, for
+ * best-effort probes where a missing type is an expected, non-fatal case
+ * (e.g. probing for resizable-BAR memory before falling back). */
+static uint32_t find_memory_type_quiet(VkPhysicalDevice physical_device, uint32_t type_filter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties mem_props;
     vkGetPhysicalDeviceMemoryProperties_fn(physical_device, &mem_props);
     for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
@@ -1552,10 +1555,17 @@ static uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t type
             return i;
         }
     }
-    fprintf(stderr, "Failed to find suitable memory type\n");
+    return UINT32_MAX;
+}
+
+static uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t type_filter, VkMemoryPropertyFlags properties) {
+    uint32_t index = find_memory_type_quiet(physical_device, type_filter, properties);
+    if (index == UINT32_MAX) {
+        fprintf(stderr, "Failed to find suitable memory type\n");
+    }
     /* UINT32_MAX is never a valid memoryTypeIndex; callers must check for it
      * and fail rather than bind/allocate with an out-of-range index. */
-    return UINT32_MAX;
+    return index;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2188,8 +2198,20 @@ static bool create_vertex_buffer(void) {
         VkMemoryAllocateInfo alloc_ci = {0};
         alloc_ci.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         alloc_ci.allocationSize = mem_reqs.size;
-        alloc_ci.memoryTypeIndex = find_memory_type(vulkan_state.physical_device, mem_reqs.memoryTypeBits,
-                                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        /* Prefer resizable-BAR memory (HOST_VISIBLE | HOST_COHERENT |
+         * DEVICE_LOCAL) so the GPU reads vertex data from device-local memory
+         * while the CPU still writes it through the mapping. Keep HOST_COHERENT
+         * in the probe — the flush-time memcpy relies on coherent visibility,
+         * not an explicit cache flush. Fall back to plain HOST_COHERENT when
+         * the device has no BAR type. */
+        alloc_ci.memoryTypeIndex = find_memory_type_quiet(vulkan_state.physical_device, mem_reqs.memoryTypeBits,
+                                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+                                                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (alloc_ci.memoryTypeIndex == UINT32_MAX) {
+            alloc_ci.memoryTypeIndex = find_memory_type(vulkan_state.physical_device, mem_reqs.memoryTypeBits,
+                                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        }
 
         if (alloc_ci.memoryTypeIndex == UINT32_MAX ||
             vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL,
@@ -2208,9 +2230,10 @@ static bool create_vertex_buffer(void) {
             return false;
         }
 
-        /* Memory is HOST_COHERENT and the GPU only reads these buffers, so map
-         * each one once for the lifetime of the renderer and memcpy into the
-         * persistent pointer on flush (no per-flush map/unmap). */
+        /* Memory is HOST_COHERENT (with or without DEVICE_LOCAL) and the GPU
+         * only reads these buffers, so map each one once for the lifetime of
+         * the renderer and memcpy into the persistent pointer on flush (no
+         * per-flush map/unmap). */
         void *data;
         if (vkMapMemory_fn(vulkan_state.device, vulkan_state.vertex_buffer_memories[i], 0,
                            buffer_ci.size, 0, &data) != VK_SUCCESS) {
