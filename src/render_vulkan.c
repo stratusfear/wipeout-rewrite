@@ -3510,53 +3510,14 @@ void render_flush(void) {
 
     /* Texture uploads queued mid-frame (e.g. a level load during
      * game_update) must reach the atlas before the first draw that could
-     * sample them. Transfers cannot be recorded inside the active rendering
-     * scope, so end it, flush on a separate command buffer (submit + wait),
-     * then re-open with LOAD_OP_LOAD to preserve what is already drawn. The
-     * viewport/scissor are dynamic and re-issued here; pipeline/descriptor
-     * bindings persist across End/BeginRendering. */
+     * sample them. render_flush_pending_textures records the transfers into
+     * a separate upload command buffer and submits it to the same graphics
+     * queue, waiting for completion (vkQueueWaitIdle), so the copies execute
+     * ahead of this frame's draw commands — the active rendering scope is
+     * never interrupted, and the dynamic viewport/scissor state plus all
+     * bindings persist unchanged. */
     if (vulkan_state.pending_uploads_len > 0) {
-        vkCmdEndRendering_fn(vulkan_state.command_buffer);
         render_flush_pending_textures();
-
-        VkRenderingAttachmentInfo color_attachment = {0};
-        color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        color_attachment.imageView = vulkan_state.backbuffer_image_view;
-        color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-
-        VkRenderingAttachmentInfo depth_attachment = {0};
-        depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        depth_attachment.imageView = vulkan_state.backbuffer_depth_image_view;
-        depth_attachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-
-        VkRenderingInfo rendering_info = {0};
-        rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-        rendering_info.renderArea.extent.width = (uint32_t)vulkan_state.backbuffer_size.x;
-        rendering_info.renderArea.extent.height = (uint32_t)vulkan_state.backbuffer_size.y;
-        rendering_info.layerCount = 1;
-        rendering_info.viewMask = 0;
-        rendering_info.colorAttachmentCount = 1;
-        rendering_info.pColorAttachments = &color_attachment;
-        rendering_info.pDepthAttachment = &depth_attachment;
-        vkCmdBeginRendering_fn(vulkan_state.command_buffer, &rendering_info);
-
-        /* Re-issue the negative-height game viewport (see render_frame_prepare):
-         * NDC y=+1 -> window y=0 (top), scene upright in the backbuffer. */
-        VkViewport vp = {0};
-        vp.y      = (float)vulkan_state.backbuffer_size.y;
-        vp.width  = (float)vulkan_state.backbuffer_size.x;
-        vp.height = -(float)vulkan_state.backbuffer_size.y;
-        vp.maxDepth = 1.0f;
-        vkCmdSetViewport_fn(vulkan_state.command_buffer, 0, 1, &vp);
-
-        VkRect2D scissor = {0};
-        scissor.extent.width = (uint32_t)vulkan_state.backbuffer_size.x;
-        scissor.extent.height = (uint32_t)vulkan_state.backbuffer_size.y;
-        vkCmdSetScissor_fn(vulkan_state.command_buffer, 0, 1, &scissor);
     }
 
     uint32_t f = vulkan_state.frame_index;
