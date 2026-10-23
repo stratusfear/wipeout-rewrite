@@ -15,10 +15,10 @@ layout(push_constant) uniform PushConstants {
 // by https://github.com/mattiasgustavsson/
 // 1:1 port of GL SHADER_POST_FS_CRT (render_gl.c).
 
-// The quad has v_uv.y=0 at the top (Vulkan), while GL's post quad has
-// v_uv.y=0 at the bottom. GL-space uv (== gl_FragCoord / screen_size) is
-// therefore vec2(v_uv.x, 1.0 - v_uv.y). The backbuffer image is top-origin
-// (row 0 = top), so sampling with GL-space uv requires flipping y.
+// v_uv is y-up (v_uv.y=1 at the window top), matching GL's gl_FragCoord /
+// screen_size, so frag_coord below feeds curve() the same y-up uv the GL
+// reference uses. The backbuffer image is top-origin (row 0 = top), unlike
+// GL's y-up texture, so sampling that y-up uv requires flipping y.
 vec2 smp_uv(vec2 uv) {
     return vec2(uv.x, 1.0 - uv.y);
 }
@@ -34,8 +34,9 @@ vec2 curve(vec2 uv) {
 }
 
 void main() {
-    // frag_coord == GL gl_FragCoord.xy exactly (pixel-center interpolation).
-    vec2 frag_coord = vec2(v_uv.x, 1.0 - v_uv.y) * pc.u_resolution;
+    // v_uv is y-up like GL's gl_FragCoord, so frag_coord == GL gl_FragCoord.xy
+    // exactly (pixel-center interpolation).
+    vec2 frag_coord = v_uv * pc.u_resolution;
     vec2 uv = curve(frag_coord / pc.u_resolution);
     vec3 color;
     float x = sin(0.3 * pc.u_time + uv.y * 21.0) * sin(0.7 * pc.u_time + uv.y * 29.0) * sin(0.3 + 0.33 * pc.u_time + uv.y * 31.0) * 0.0017;
