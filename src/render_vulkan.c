@@ -429,6 +429,14 @@ static struct vulkan_state {
     VkSemaphore timeline_semaphore; /* TIMELINE type, replaces frame fences */
     uint64_t timeline_next_value; /* Next value to signal on submit (monotonic) */
     uint64_t slot_fence_value[MAX_FRAMES_IN_FLIGHT]; /* Value each slot's last submit will signal */
+    /* Upload completion is tracked lazily (no queue idle after upload
+     * submits): the last upload submit signals timeline_semaphore with
+     * upload_timeline_value; the CPU only blocks on it at the two points
+     * that genuinely require the previous upload to have finished —
+     * rewriting the persistent staging buffer and resetting the upload
+     * command pool (upload_wait_prev_complete). */
+    uint64_t upload_timeline_value;
+    bool upload_timeline_pending;
     VkCommandPool command_pools[MAX_FRAMES_IN_FLIGHT];
     VkCommandBuffer command_buffers[MAX_FRAMES_IN_FLIGHT];
     VkCommandBuffer command_buffer; /* Working pointer to current frame's CB */
@@ -4174,10 +4182,69 @@ static void atlas_generate_mips_and_finish(VkCommandBuffer cb,
 }
 
 /* ------------------------------------------------------------------ */
+/* Upload submit + lazy completion                                     */
+/* ------------------------------------------------------------------ */
+
+/* Submit the recorded upload command buffer, signalling timeline_semaphore
+ * with a fresh monotonic value instead of blocking on vkQueueWaitIdle. The
+ * queue is FIFO, so the signal executes exactly when the upload's commands
+ * complete; upload_wait_prev_complete() blocks on it later, only when the
+ * CPU actually needs the upload machinery (staging buffer, upload pool)
+ * back. Queue submission order still orders the upload before the frame's
+ * draws on the GPU (same queue, submitted earlier). */
+static void upload_submit(void) {
+    uint64_t value = vulkan_state.timeline_next_value++;
+    vulkan_state.upload_timeline_value = value;
+    vulkan_state.upload_timeline_pending = true;
+
+    VkSemaphore signal = vulkan_state.timeline_semaphore;
+    VkTimelineSemaphoreSubmitInfo timeline_submit = {0};
+    timeline_submit.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timeline_submit.signalSemaphoreValueCount = 1;
+    timeline_submit.pSignalSemaphoreValues = &value;
+
+    VkSubmitInfo submit_info = {0};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.pNext = &timeline_submit;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &vulkan_state.upload_command_buffer;
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &signal;
+    VK_CHECK(vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit_info, VK_NULL_HANDLE));
+}
+
+/* Block until the previous upload submit has finished executing (no-op when
+ * none is outstanding). Two consumers of that guarantee:
+ * - the CPU rewrites the persistently-mapped staging buffer right after
+ *   this call (the previous upload's vkCmdCopyBufferToImage reads it);
+ * - vkResetCommandPool on the upload pool requires its command buffers to
+ *   be non-pending (VUID-vkResetCommandPool-commandPool-00043).
+ * Both flush paths call it at their top, before staging writes. */
+static void upload_wait_prev_complete(void) {
+    if (!vulkan_state.upload_timeline_pending) return;
+    VkSemaphoreWaitInfo wait_info = {0};
+    wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    wait_info.pSemaphores = &vulkan_state.timeline_semaphore;
+    wait_info.pValues = &vulkan_state.upload_timeline_value;
+    wait_info.semaphoreCount = 1;
+    VkResult r = vkWaitSemaphores_fn(vulkan_state.device, &wait_info, UINT64_MAX);
+    if (r == VK_ERROR_DEVICE_LOST) {
+        fprintf(stderr, "Vulkan: device lost waiting for texture upload\n");
+    }
+    else if (r != VK_SUCCESS) {
+        fprintf(stderr, "Vulkan: upload timeline wait failed (%d)\n", (int)r);
+    }
+    vulkan_state.upload_timeline_pending = false;
+}
+
+/* ------------------------------------------------------------------ */
 /* Flush pending texture uploads (batched)                              */
 /* ------------------------------------------------------------------ */
 void render_flush_pending_textures(void) {
     if (vulkan_state.pending_uploads_len == 0) return;
+
+    /* Previous upload must be done before staging writes and pool reset. */
+    upload_wait_prev_complete();
 
     uint32_t atlas_width = ATLAS_SIZE * ATLAS_GRID;
     uint32_t atlas_height = ATLAS_SIZE * ATLAS_GRID;
@@ -4237,12 +4304,7 @@ void render_flush_pending_textures(void) {
 
     VK_CHECK(vkEndCommandBuffer_fn(vulkan_state.upload_command_buffer));
 
-    VkSubmitInfo submit_info = {0};
-    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &vulkan_state.upload_command_buffer;
-    VK_CHECK(vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit_info, VK_NULL_HANDLE));
-    queue_wait_idle("pending texture upload flush");
+    upload_submit();
 
     /* Free the queued pixel copies (allocated in render_texture_create) */
     for (uint32_t i = 0; i < vulkan_state.pending_uploads_len; i++) {
@@ -4361,6 +4423,10 @@ void render_texture_replace_pixels(int16_t texture_index, rgba_t *pixels) {
     vulkan_texture_t *t = &vulkan_state.textures[texture_index];
     uint32_t atlas_width = ATLAS_SIZE * ATLAS_GRID;
 
+    /* Previous upload (possibly the batch just flushed) must be done before
+     * staging writes and pool reset. */
+    upload_wait_prev_complete();
+
     /* Stage the new pixels into the persistent upload buffer at the
      * texture's body offset (row stride atlas_width), mirroring GL's
      * glTexSubImage2D on the same region. */
@@ -4427,12 +4493,7 @@ void render_texture_replace_pixels(int16_t texture_index, rgba_t *pixels) {
 
         VK_CHECK(vkEndCommandBuffer_fn(vulkan_state.upload_command_buffer));
 
-        VkSubmitInfo submit = {0};
-        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit.commandBufferCount = 1;
-        submit.pCommandBuffers = &vulkan_state.upload_command_buffer;
-        VK_CHECK(vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit, VK_NULL_HANDLE));
-        queue_wait_idle("replace_pixels upload");
+        upload_submit();
 
         /* Level 0 round-tripped through TRANSFER_DST_OPTIMAL and is back in
          * the tracked layout; the other levels never left it. */
