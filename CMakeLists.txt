@@ -9,6 +9,16 @@ include(GNUInstallDirs)
 include(CMakeDependentOption)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
+# Default to a Release build when the caller did not pick a build type:
+# an unconfigured build previously compiled C sources with no
+# optimization flags at all (effective -O0). Multi-config generators
+# (Xcode, VS) keep their per-config selection.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+	set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+	set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+		"Debug" "Release" "RelWithDebInfo" "MinSizeRel")
+endif()
+
 if("${CMAKE_SYSTEM_NAME}" STREQUAL "Emscripten")
 	set(EMSCRIPTEN true)
 endif()
