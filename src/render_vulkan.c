@@ -339,7 +339,11 @@ static bool load_device_functions(VkDevice device, VkInstance instance) {
 static VkDebugUtilsMessengerEXT debug_callback = VK_NULL_HANDLE;
 
 /* Forward declarations */
-static bool create_swapchain(VkSwapchainKHR old_swapchain);
+/* old_retired (out): set to true once vkCreateSwapchainKHR has actually
+ * been called with old_swapchain — at that point the old swapchain is
+ * retired per spec and can never be used again, which changes how the
+ * caller must treat a failure (destroy it vs. keep presenting through it). */
+static bool create_swapchain(VkSwapchainKHR old_swapchain, bool *old_retired);
 static void destroy_swapchain(void);
 static void destroy_swapchain_resources(VkSwapchainKHR swapchain, VkImage *images,
                                         VkImageView *views, uint32_t count);
@@ -1074,7 +1078,8 @@ void render_init(vec2i_t screen_size) {
     }
 
     /* -- 7. Create swapchain -- */
-    if (!create_swapchain(VK_NULL_HANDLE)) {
+    bool unused_old_retired = false;
+    if (!create_swapchain(VK_NULL_HANDLE, &unused_old_retired)) {
         fprintf(stderr, "Failed to create swapchain\n");
         goto cleanup;
     }
@@ -1835,7 +1840,12 @@ static VkExtent2D choose_backbuffer_extent(vec2i_t backbuffer_size) {
     return extent;
 }
 
-static bool create_swapchain(VkSwapchainKHR old_swapchain) {
+static bool create_swapchain(VkSwapchainKHR old_swapchain, bool *old_retired) {
+    *old_retired = false;
+    /* Once-per-episode failure logging flags; reset when a swapchain is
+     * successfully created (the deferred recreate path retries every frame). */
+    static bool zero_extent_logged = false;
+    static bool create_failed_logged = false;
     VkSurfaceCapabilitiesKHR caps = {0};
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR_fn(vulkan_state.physical_device, vulkan_state.surface, &caps);
 
@@ -1848,11 +1858,20 @@ static bool create_swapchain(VkSwapchainKHR old_swapchain) {
      * deferred recreate path retries every frame, so a later bail would
      * spam it) — and before syncing screen_size below, so the previous
      * good size is not clobbered. Callers: init fails cleanly;
-     * render_frame_prepare's deferred block keeps the recreate flags set,
-     * skips the frame and retries next frame (verified with a temporary
-     * forced 0x0 extent: no VVL errors, old swapchain intact, game alive). */
+     * render_frame_prepare's deferred block keeps the recreate flags set and —
+     * because vkCreateSwapchainKHR was never called here, so the old swapchain
+     * is NOT retired — restores it and keeps rendering through it at the old
+     * extent until a retry sees a valid extent. */
     if (vulkan_state.swapchain_extent.width == 0 ||
         vulkan_state.swapchain_extent.height == 0) {
+        /* Loud once per episode: the deferred retry loop calls this every
+         * frame, so a plain printf would spam at frame rate — but total
+         * silence is what made the window-resize freeze undebuggable. */
+        if (!zero_extent_logged) {
+            fprintf(stderr, "Vulkan: surface reports 0x0 extent; keeping current "
+                            "swapchain, retrying next frame\n");
+            zero_extent_logged = true;
+        }
         return false;
     }
 
@@ -1865,15 +1884,23 @@ static bool create_swapchain(VkSwapchainKHR old_swapchain) {
         vulkan_state.surface_color_space = surface_format.colorSpace;
     }
     VkPresentModeKHR present_mode = choose_present_mode(vulkan_state.physical_device, vulkan_state.surface);
-    printf("Vulkan: swapchain present mode: %s\n",
+    printf("Vulkan: swapchain present mode: %s (extent %ux%u, SDL size %dx%d)\n",
            present_mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" :
-           present_mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "FIFO_RELAXED" : "FIFO");
+           present_mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "FIFO_RELAXED" : "FIFO",
+           vulkan_state.swapchain_extent.width, vulkan_state.swapchain_extent.height,
+           vulkan_state.screen_size.x, vulkan_state.screen_size.y);
 
-    /* Sync screen_size to swapchain_extent — on Wayland screen_size may be
-     * 0×0 from SDL_GetDrawableSize() before the window is mapped, but the
-     * compositor always provides a valid currentExtent. */
-    vulkan_state.screen_size = vec2i((int)vulkan_state.swapchain_extent.width,
-                                     (int)vulkan_state.swapchain_extent.height);
+    /* Only adopt the driver's extent when we never learned the window size
+     * from SDL (Wayland pre-mapping reports 0×0). A live SDL size IS the
+     * compositor's configured size; overwriting it with the driver-reported
+     * extent — which on Wayland can lag a resize until the driver has seen
+     * a commit at the new size — would make a resize-recreate storm
+     * permanent: every retry builds at the lagging extent and gets
+     * rejected again. */
+    if (vulkan_state.screen_size.x <= 0 || vulkan_state.screen_size.y <= 0) {
+        vulkan_state.screen_size = vec2i((int)vulkan_state.swapchain_extent.width,
+                                         (int)vulkan_state.swapchain_extent.height);
+    }
 
     uint32_t image_count = caps.minImageCount + 1;
     if (caps.maxImageCount > 0 && image_count > caps.maxImageCount) {
@@ -1915,7 +1942,19 @@ static bool create_swapchain(VkSwapchainKHR old_swapchain) {
      * the surface never lacks a presentation source mid-recreation. */
     swapchain_ci.oldSwapchain = old_swapchain;
 
-    if (vkCreateSwapchainKHR_fn(vulkan_state.device, &swapchain_ci, NULL, &vulkan_state.swapchain) != VK_SUCCESS) {
+    /* Passing oldSwapchain retires it the moment the call is made — even if
+     * it fails — so flag that before calling: on failure the caller must
+     * destroy the old swapchain (it can never present again) rather than
+     * restore it. */
+    *old_retired = true;
+    VkResult sc_result = vkCreateSwapchainKHR_fn(vulkan_state.device, &swapchain_ci, NULL, &vulkan_state.swapchain);
+    if (sc_result != VK_SUCCESS) {
+        vulkan_state.swapchain = VK_NULL_HANDLE;
+        if (!create_failed_logged) {
+            fprintf(stderr, "Vulkan: vkCreateSwapchainKHR failed (%d); "
+                            "retrying next frame\n", (int)sc_result);
+            create_failed_logged = true;
+        }
         return false;
     }
 
@@ -1955,10 +1994,18 @@ static bool create_swapchain(VkSwapchainKHR old_swapchain) {
         view_ci.subresourceRange.levelCount = 1;
         view_ci.subresourceRange.layerCount = 1;
         if (vkCreateImageView_fn(vulkan_state.device, &view_ci, NULL, &vulkan_state.swapchain_image_views[i]) != VK_SUCCESS) {
+            static bool view_fail_logged = false;
+            if (!view_fail_logged) {
+                fprintf(stderr, "Vulkan: swapchain image view creation "
+                                "failed; retrying next frame\n");
+                view_fail_logged = true;
+            }
             return false;
         }
     }
 
+    zero_extent_logged = false;
+    create_failed_logged = false;
     return true;
 }
 
@@ -2017,7 +2064,10 @@ static bool create_image(uint32_t width, uint32_t height, uint32_t mip_levels,
     image_ci.samples = VK_SAMPLE_COUNT_1_BIT;
     image_ci.flags = 0;
 
-    if (vkCreateImage_fn(vulkan_state.device, &image_ci, NULL, out_image) != VK_SUCCESS) {
+    VkResult res = vkCreateImage_fn(vulkan_state.device, &image_ci, NULL, out_image);
+    if (res != VK_SUCCESS) {
+        fprintf(stderr, "Vulkan: vkCreateImage failed (%d) for %ux%u fmt %d\n",
+                (int)res, width, height, (int)format);
         return false;
     }
 
@@ -2029,8 +2079,14 @@ static bool create_image(uint32_t width, uint32_t height, uint32_t mip_levels,
     alloc_ci.allocationSize = mem_reqs.size;
     alloc_ci.memoryTypeIndex = find_memory_type(vulkan_state.physical_device, mem_reqs.memoryTypeBits, mem_props);
 
-    if (alloc_ci.memoryTypeIndex == UINT32_MAX ||
-        vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL, out_memory) != VK_SUCCESS) {
+    res = (alloc_ci.memoryTypeIndex == UINT32_MAX)
+              ? VK_ERROR_INITIALIZATION_FAILED
+              : vkAllocateMemory_fn(vulkan_state.device, &alloc_ci, NULL, out_memory);
+    if (res != VK_SUCCESS) {
+        fprintf(stderr, "Vulkan: vkAllocateMemory failed (%d) for %ux%u fmt "
+                        "%d (%llu bytes) — out of VRAM?\n",
+                (int)res, width, height, (int)format,
+                (unsigned long long)mem_reqs.size);
         vkDestroyImage_fn(vulkan_state.device, *out_image, NULL);
         *out_image = VK_NULL_HANDLE;
         return false;
@@ -3085,6 +3141,28 @@ static void destroy_pipelines(void) {
 /* Frame prepare / end                                                 */
 /* ------------------------------------------------------------------ */
 
+/* Window-lifecycle diagnostics: stale-surface marks per recovery path, and
+ * a streak of swapchain recreates that have not yet ended in a flag-free
+ * ("stable") frame. A geometry change SHOULD cost a handful of recreates;
+ * an endless streak is the resize-recreate storm, so once per episode a
+ * single summary line names the extent/SDL-size mismatch and the exact
+ * paths that keep flagging, instead of the freeze being silent. */
+static uint32_t recreate_streak = 0;
+static uint32_t stale_acquire_ood = 0, stale_acquire_sub = 0;
+static uint32_t stale_present_ood = 0, stale_present_sub = 0;
+static bool suboptimal_accepted_logged = false;
+
+/* Presentation-stall heartbeat: time of the last successful present and
+ * the last acquire/present results. Once the renderer goes 2 s without a
+ * successful present, render_frame_end prints a state snapshot every 5 s
+ * — no freeze mode stays silent. If the log goes SILENT while the game
+ * still runs, the main thread is blocked inside a Vulkan call rather
+ * than looping in the skip paths, and a /proc wchan snapshot names it. */
+static uint64_t stall_last_present_ms = 0;
+static uint64_t stall_last_report_ms = 0;
+static int stall_last_acquire = 0; /* VK_SUCCESS */
+static int stall_last_present = 0; /* VK_SUCCESS */
+
 void render_set_resolution(render_resolution_t res) {
     if (!vulkan_state.device) {
         fprintf(stderr, "[VK] render_set_resolution: device is NULL (renderer not initialized)\n");
@@ -3115,8 +3193,9 @@ void render_frame_prepare(void) {
 
         /* Step 1: swapchain (if pending). create_swapchain() re-syncs
          * screen_size to the extent the driver actually reports, so the
-         * backbuffer (NATIVE) tracks the new window size. Must succeed
-         * before we touch the backbuffer; on failure retry next frame.
+         * backbuffer (NATIVE) tracks the new window size. On failure we
+         * either keep the old swapchain and fall through (retry next frame)
+         * or skip the frame — see the failure branch below.
          *
          * The replacement is created FIRST, passing the old swapchain as
          * oldSwapchain (which retires it), and only then is the old one
@@ -3129,39 +3208,148 @@ void render_frame_prepare(void) {
             VkImage *old_images = vulkan_state.swapchain_images;
             VkImageView *old_views = vulkan_state.swapchain_image_views;
             uint32_t old_count = vulkan_state.swapchain_image_count;
+            /* create_swapchain() overwrites the extent before its zero-guard
+             * can bail, so stash it too: a kept-alive old swapchain must keep
+             * its own extent or the post pass would render at 0x0. */
+            VkExtent2D old_extent = vulkan_state.swapchain_extent;
             vulkan_state.swapchain = VK_NULL_HANDLE;
             vulkan_state.swapchain_images = NULL;
             vulkan_state.swapchain_image_views = NULL;
             vulkan_state.swapchain_image_count = 0;
 
-            if (!create_swapchain(old_swapchain)) {
-                /* Creation failed: old_swapchain is already retired (no more
-                 * acquires from it), so destroy it and any partially-created
-                 * new resources; retry next frame. */
+            bool old_retired = false;
+            if (!create_swapchain(old_swapchain, &old_retired)) {
+                /* Clean up any partially-created NEW swapchain resources
+                 * (no-op when the bail happened before vkCreateSwapchainKHR). */
                 destroy_swapchain();
-                destroy_swapchain_resources(old_swapchain, old_images, old_views,
-                                            old_count);
-                return;
-            }
+                if (old_retired) {
+                    /* vkCreateSwapchainKHR was called with old_swapchain as
+                     * oldSwapchain, which retires it: it can never present
+                     * again, so destroy it and skip this frame — there is no
+                     * presentation target until a later retry succeeds. */
+                    destroy_swapchain_resources(old_swapchain, old_images,
+                                                old_views, old_count);
+                    return;
+                }
+                /* create_swapchain bailed BEFORE calling vkCreateSwapchainKHR
+                 * (e.g. 0x0 surface extent): the old swapchain was never
+                 * retired and is still fully valid. Restore it as the current
+                 * swapchain and render this frame through it at the old
+                 * extent, keeping the recreate flag set so the next frame
+                 * retries. Destroying it here — as an earlier version did —
+                 * turned a transient surface-reconfigure race into a
+                 * permanent silent freeze: nothing could ever be presented
+                 * again while the game loop kept running. */
+                vulkan_state.swapchain = old_swapchain;
+                vulkan_state.swapchain_images = old_images;
+                vulkan_state.swapchain_image_views = old_views;
+                vulkan_state.swapchain_image_count = old_count;
+                vulkan_state.swapchain_extent = old_extent;
+            } else {
+                /* New swapchain is live: destroy the retired old one. Its image
+                 * memory is freed by the driver only once the presentation
+                 * engine stops using it (spec-guaranteed). */
+                destroy_swapchain_resources(old_swapchain, old_images,
+                                            old_views, old_count);
+                vulkan_state.swapchain_recreate_pending = false;
 
-            /* New swapchain is live: destroy the retired old one. Its image
-             * memory is freed by the driver only once the presentation
-             * engine stops using it (spec-guaranteed). */
-            destroy_swapchain_resources(old_swapchain, old_images, old_views,
-                                        old_count);
-            vulkan_state.swapchain_recreate_pending = false;
+                /* Storm detector: a geometry change legitimately costs a few
+                 * recreates; a long streak of recreates that never settle
+                 * means every fresh swapchain is being rejected again — print
+                 * the mismatch once instead of spamming only present-mode
+                 * lines. */
+                recreate_streak++;
+                if (recreate_streak == 30) {
+                    fprintf(stderr, "Vulkan: swapchain recreated %u consecutive "
+                                    "frames without one stable frame (extent "
+                                    "%ux%u, SDL size %dx%d; stale marks: acquire "
+                                    "out-of-date %u, acquire suboptimal %u, "
+                                    "present out-of-date %u, present suboptimal "
+                                    "%u)\n",
+                            recreate_streak,
+                            vulkan_state.swapchain_extent.width,
+                            vulkan_state.swapchain_extent.height,
+                            vulkan_state.screen_size.x,
+                            vulkan_state.screen_size.y,
+                            stale_acquire_ood, stale_acquire_sub,
+                            stale_present_ood, stale_present_sub);
+                }
+            }
         }
 
-        /* Step 2: backbuffer (if pending). screen_size is now fresh. */
+        /* Step 2: backbuffer (if pending). screen_size is now fresh.
+         *
+         * VRAM-pressure resilience: the old backbuffer is destroyed BEFORE
+         * the new one is allocated (it is not a presentation-engine object,
+         * so destroying it first keeps the transient allocation window at
+         * 1x rather than 2x — swapchain images under a drag-resize storm
+         * already double the footprint). But a failed allocation with the
+         * old buffer already gone used to leave the renderer with no
+         * render target at all: the retry loop never presented a frame
+         * again — the permanent freeze seen on low-VRAM machines (log:
+         * "backbuffer creation failed" + heartbeat showing no successful
+         * present). Recovery: retry at the PREVIOUS size — an allocation
+         * that demonstrably just succeeded — so presentation keeps
+         * running at the old resolution instead of dying. */
         if (vulkan_state.backbuffer_recreate_pending) {
-            vulkan_state.backbuffer_size = choose_backbuffer_size(vulkan_state.render_res, vulkan_state.screen_size);
+            vec2i_t old_backbuffer_size = vulkan_state.backbuffer_size;
+            vec2i_t new_backbuffer_size = choose_backbuffer_size(vulkan_state.render_res, vulkan_state.screen_size);
             destroy_backbuffer();
+            static bool backbuffer_fail_logged = false;
+            vulkan_state.backbuffer_size = new_backbuffer_size;
             if (!create_backbuffer()) {
-                return;
+                if (!backbuffer_fail_logged) {
+                    fprintf(stderr, "Vulkan: backbuffer creation failed "
+                                    "(%dx%d, VRAM pressure?); falling back to "
+                                    "previous size %dx%d and retrying the new "
+                                    "size next frame\n",
+                            new_backbuffer_size.x, new_backbuffer_size.y,
+                            old_backbuffer_size.x, old_backbuffer_size.y);
+                    backbuffer_fail_logged = true;
+                }
+                vulkan_state.backbuffer_size = old_backbuffer_size;
+                if (!create_backbuffer()) {
+                    /* Even the previously-working size cannot be allocated
+                     * now (the swapchain-recreate storm of a drag-resize can
+                     * itself exhaust VRAM while the compositor retires the
+                     * old swapchains' buffers). Shrink progressively — a
+                     * visibly degraded game beats a dead one — and keep the
+                     * recreate flag set so the retry loop climbs back to the
+                     * requested size as VRAM frees (the compositor does
+                     * eventually retire the old swapchains' images). */
+                    int w = old_backbuffer_size.x, h = old_backbuffer_size.y;
+                    bool recovered = true;
+                    while (true) {
+                        w /= 2; h /= 2;
+                        if (w < 320 || h < 240) {
+                            recovered = false;
+                            break;
+                        }
+                        vulkan_state.backbuffer_size = vec2i(w, h);
+                        if (create_backbuffer()) {
+                            break;
+                        }
+                    }
+                    if (!recovered) {
+                        /* Keep the flag set (retries next frame) and skip
+                         * this one. The heartbeat in render_frame_end
+                         * reports the stall instead of the freeze being
+                         * silent. */
+                        return;
+                    }
+                    fprintf(stderr, "Vulkan: backbuffer recovered at shrunk "
+                                    "size %dx%d\n", w, h);
+                }
             }
             if (!update_backbuffer_descriptor()) {
+                if (!backbuffer_fail_logged) {
+                    fprintf(stderr, "Vulkan: backbuffer descriptor update "
+                                    "failed; retrying next frame\n");
+                    backbuffer_fail_logged = true;
+                }
                 return;
             }
+            backbuffer_fail_logged = false;
             /* Atlas min filter follows the resolution (GL parity:
              * render_gl.c:561-568): trilinear at NATIVE, NEAREST at 240P/480P.
              * Re-write the existing atlas descriptor set — host-side update,
@@ -3241,11 +3429,13 @@ void render_frame_prepare(void) {
      * times out spuriously; a non-presenting one yields VK_TIMEOUT and we
      * skip the frame (command_buffer stays NULL, render_frame_end's guard
      * drops it) and retry next frame — the same path as OUT_OF_DATE. */
+    static uint32_t acquire_timeout_streak = 0; /* reset on acquire success */
     VkResult acquire_result = vkAcquireNextImageKHR_fn(vulkan_state.device, vulkan_state.swapchain,
                              100ull * 1000 * 1000,
                              vulkan_state.image_acquired_semaphores[f],
                              VK_NULL_HANDLE,
                              &vulkan_state.current_swapchain_image);
+    stall_last_acquire = (int)acquire_result;
     if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
         /* No image was acquired. The surface changed (resized, recomposited),
          * so recreate the swapchain at the top of the next prepare; the screen
@@ -3254,22 +3444,61 @@ void render_frame_prepare(void) {
          * (render_frame_end's guard drops it). */
         vulkan_state.swapchain_recreate_pending = true;
         vulkan_state.backbuffer_recreate_pending = true;
+        stale_acquire_ood++;
         return;
     } else if (acquire_result == VK_SUBOPTIMAL_KHR) {
         /* SUBOPTIMAL is a SUCCESS code: an image HAS been acquired and the
-         * acquire semaphore is signaled, so render this frame normally. The
-         * surface is no longer optimal (e.g. display scale changed), so flag
-         * the swapchain for recreation before the next frame. A scale change
-         * also moves the NATIVE-resolution backbuffer target, so flag it too
-         * — create_swapchain re-syncs screen_size to the new extent but only
-         * a backbuffer_recreate_pending resize re-allocates the backbuffer,
-         * matching the present path's SUBOPTIMAL/OUT_OF_DATE handling. */
-        vulkan_state.swapchain_recreate_pending = true;
-        vulkan_state.backbuffer_recreate_pending = true;
+         * acquire semaphore is signaled, so render this frame normally.
+         * Only recreate when the swapchain extent actually disagrees with
+         * the SDL/compositor window size: a Wayland surface can stay
+         * suboptimal indefinitely (e.g. fractional scale) while its extent
+         * is already correct, and recreating an identical swapchain every
+         * frame is a storm the compositor never resolves. The GL path does
+         * not act on suboptimal surface states at all. A genuine scale
+         * change disagrees, so then also flag the NATIVE-resolution
+         * backbuffer — matching the present path's handling. */
+        if (vulkan_state.swapchain_extent.width != (uint32_t)vulkan_state.screen_size.x ||
+            vulkan_state.swapchain_extent.height != (uint32_t)vulkan_state.screen_size.y) {
+            vulkan_state.swapchain_recreate_pending = true;
+            vulkan_state.backbuffer_recreate_pending = true;
+        }
+        stale_acquire_sub++;
     } else if (acquire_result == VK_TIMEOUT || acquire_result == VK_NOT_READY) {
         /* No image available within the timeout (e.g. window minimized and
          * the presentation engine stopped releasing images). Skip this
-         * frame and retry next frame — never block indefinitely. */
+         * frame and retry next frame — never block indefinitely.
+         * Log once per episode (a legitimate minimized window keeps timing
+         * out, so do NOT log every frame) — a permanent silent timeout
+         * loop is otherwise indistinguishable from a screen hang.
+         *
+         * Stalled-handshake recovery: after ~6 s of timeouts (60 x 100 ms)
+         * the presentation engine is not just busy, it has stopped
+         * releasing images for this swapchain — the Wayland compositor
+         * waits for a commit at the surface's configured size while we
+         * refuse to render because the OLD-size swapchain yields no
+         * images: a true deadlock the game cannot resize its way out of
+         * (only a fresh geometry change unfroze it, by restarting the
+         * compositor handshake). Force a swapchain recreation: fresh
+         * images start a new handshake, the first present at the current
+         * size releases the stall. Recount from zero after forcing, so
+         * an unresolved stall forces again every 6 s instead of per-frame
+         * churn. A legitimately minimized window costs one harmless
+         * recreate per 6 s while hidden. */
+        acquire_timeout_streak++;
+        if (acquire_timeout_streak >= 60 && (acquire_timeout_streak - 60) % 60 == 0) {
+            fprintf(stderr, "Vulkan: %u consecutive acquire timeouts (%d): "
+                            "presentation engine stopped releasing images; "
+                            "forcing swapchain recreation to restart the "
+                            "presentation handshake (extent %ux%u, SDL size "
+                            "%dx%d)\n",
+                    acquire_timeout_streak, (int)acquire_result,
+                    vulkan_state.swapchain_extent.width,
+                    vulkan_state.swapchain_extent.height,
+                    vulkan_state.screen_size.x, vulkan_state.screen_size.y);
+            vulkan_state.swapchain_recreate_pending = true;
+            vulkan_state.backbuffer_recreate_pending = true;
+            acquire_timeout_streak = 0;
+        }
         return;
     } else if (acquire_result == VK_ERROR_SURFACE_LOST_KHR ||
                acquire_result == VK_ERROR_DEVICE_LOST) {
@@ -3280,6 +3509,10 @@ void render_frame_prepare(void) {
                 (int)acquire_result);
         return;
     }
+
+    /* Acquire reached a usable image (success or suboptimal): end any
+     * timeout episode so the next stall logs again. */
+    acquire_timeout_streak = 0;
 
     /* Reset per-frame command pool. Pool reset puts the pool's command
      * buffers back into the freshly-allocated (not recording, no contents)
@@ -3431,6 +3664,29 @@ void render_frame_prepare(void) {
 }
 
 void render_frame_end(void) {
+    /* Presentation-stall heartbeat (see statics above): fires while the
+     * loop is running but no present succeeds; silent-while-running means
+     * the main thread is blocked inside a Vulkan call instead. */
+    {
+        uint64_t now_ms = SDL_GetTicks64();
+        if (stall_last_present_ms != 0 &&
+            now_ms - stall_last_present_ms > 2000 &&
+            now_ms - stall_last_report_ms >= 5000) {
+            stall_last_report_ms = now_ms;
+            fprintf(stderr, "Vulkan: no successful present for %llums (last "
+                            "acquire=%d last present=%d, swapchain_recreate=%d "
+                            "backbuffer_recreate=%d, extent %ux%u, SDL size "
+                            "%dx%d)\n",
+                    (unsigned long long)(now_ms - stall_last_present_ms),
+                    stall_last_acquire, stall_last_present,
+                    vulkan_state.swapchain_recreate_pending,
+                    vulkan_state.backbuffer_recreate_pending,
+                    vulkan_state.swapchain_extent.width,
+                    vulkan_state.swapchain_extent.height,
+                    vulkan_state.screen_size.x, vulkan_state.screen_size.y);
+        }
+    }
+
     /* If no command buffer (out-of-date or error), skip rendering this frame */
     if (vulkan_state.command_buffer == VK_NULL_HANDLE) {
         return;
@@ -3627,13 +3883,37 @@ void render_frame_end(void) {
     present_info.pResults = NULL;
 
     VkResult present_result = vkQueuePresentKHR_fn(vulkan_state.graphics_queue, &present_info);
+    stall_last_present = (int)present_result;
+    if (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR) {
+        stall_last_present_ms = SDL_GetTicks64();
+    }
 
-    if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
-        /* The surface is out of date or no longer optimal; recreate the
-         * swapchain (and backbuffer, since the size may have changed) at the
-         * top of the next prepare. */
+    if (present_result == VK_ERROR_OUT_OF_DATE_KHR) {
+        /* The surface no longer matches this swapchain; recreate the
+         * swapchain (and backbuffer, since the size may have changed) at
+         * the top of the next prepare. */
         vulkan_state.swapchain_recreate_pending = true;
         vulkan_state.backbuffer_recreate_pending = true;
+        stale_present_ood++;
+    } else if (present_result == VK_SUBOPTIMAL_KHR) {
+        /* Presenting still succeeded. Like the acquire path, only act when
+         * the swapchain extent disagrees with the SDL/compositor window
+         * size; an extent that already matches cannot be improved by a
+         * recreate that would build an identical swapchain, and flagging
+         * one every frame is the resize-recreate storm. The GL renderer
+         * ignores suboptimal surface states entirely. */
+        if (vulkan_state.swapchain_extent.width != (uint32_t)vulkan_state.screen_size.x ||
+            vulkan_state.swapchain_extent.height != (uint32_t)vulkan_state.screen_size.y) {
+            vulkan_state.swapchain_recreate_pending = true;
+            vulkan_state.backbuffer_recreate_pending = true;
+        } else if (!suboptimal_accepted_logged) {
+            suboptimal_accepted_logged = true;
+            printf("Vulkan: surface reports SUBOPTIMAL at the correct extent "
+                   "%ux%u; keeping this swapchain\n",
+                   vulkan_state.swapchain_extent.width,
+                   vulkan_state.swapchain_extent.height);
+        }
+        stale_present_sub++;
     } else if (present_result == VK_ERROR_SURFACE_LOST_KHR ||
                present_result == VK_ERROR_DEVICE_LOST) {
         /* The surface or the device is gone; redrawing cannot recover. Log
@@ -3642,6 +3922,16 @@ void render_frame_end(void) {
                 (int)present_result);
     } else if (present_result != VK_SUCCESS) {
         fprintf(stderr, "vkQueuePresentKHR failed: %d\n", present_result);
+    }
+
+    /* Stable frame: neither flag set through this whole loop iteration —
+     * retire the storm episode so a later one prints its own summary. */
+    if (!vulkan_state.swapchain_recreate_pending &&
+        !vulkan_state.backbuffer_recreate_pending) {
+        recreate_streak = 0;
+        stale_acquire_ood = stale_acquire_sub = 0;
+        stale_present_ood = stale_present_sub = 0;
+        suboptimal_accepted_logged = false;
     }
 
     /* Only here do we have the complete stats (mirrors GL reference) */
