@@ -350,7 +350,6 @@ static bool create_atlas(void);
 static void destroy_atlas(void);
 static bool create_pipelines(void);
 static void destroy_pipelines(void);
-static void upload_vertex_buffer(uint32_t frame_index, uint32_t offset, uint32_t count);
 static void render_flush(void);
 static uint32_t find_memory_type(VkPhysicalDevice physical_device, uint32_t type_filter, VkMemoryPropertyFlags properties);
 
@@ -487,7 +486,6 @@ static struct vulkan_state {
     void *vertex_buffer_ptrs[MAX_FRAMES_IN_FLIGHT]; /* persistent map, whole buffer */
     uint32_t vertex_count;
     uint32_t vertex_flushed; /* vertices already uploaded+drawn this frame */
-    vertex_t *vertex_data; /* host-side staging */
     /* Per-frame triangle capacity. The buffer is cumulative (a frame's draws
      * all reference one growing region that stays live until the frame's
      * submit completes), so this bounds the WHOLE frame, not a single flush —
@@ -1583,8 +1581,6 @@ void render_cleanup(void) {
             vulkan_state.vertex_buffers[i] = VK_NULL_HANDLE;
         }
     }
-    free(vulkan_state.vertex_data);
-    vulkan_state.vertex_data = NULL;
 
     /* Destroy backbuffer */
     destroy_backbuffer();
@@ -2354,11 +2350,9 @@ static bool update_backbuffer_descriptor(void) {
 /* ------------------------------------------------------------------ */
 
 static bool create_vertex_buffer(void) {
-    vulkan_state.vertex_data = (vertex_t *)calloc(RENDER_TRIS_BUFFER_CAPACITY * 3, sizeof(vertex_t));
-    if (!vulkan_state.vertex_data) {
-        return false;
-    }
-
+    /* No host-side mirror: render_push_tris writes vertices straight into
+     * these persistent mappings (pushes only occur while a frame's slot is
+     * quiesced — prepare waited its timeline value before the first push). */
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         VkBufferCreateInfo buffer_ci = {0};
         buffer_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -2412,8 +2406,9 @@ static bool create_vertex_buffer(void) {
 
         /* Memory is HOST_COHERENT (with or without DEVICE_LOCAL) and the GPU
          * only reads these buffers, so map each one once for the lifetime of
-         * the renderer and memcpy into the persistent pointer on flush (no
-         * per-flush map/unmap). */
+         * the renderer; render_push_tris writes vertices directly through
+         * this persistent pointer (no per-flush map/unmap, no staging
+         * copy). */
         void *data;
         if (vkMapMemory_fn(vulkan_state.device, vulkan_state.vertex_buffer_memories[i], 0,
                            buffer_ci.size, 0, &data) != VK_SUCCESS) {
@@ -2427,14 +2422,6 @@ static bool create_vertex_buffer(void) {
     }
 
     return true;
-}
-
-static void upload_vertex_buffer(uint32_t frame_index, uint32_t offset, uint32_t vertex_count) {
-    if (vertex_count == 0) return;
-    /* The buffer memory is mapped once at creation (see create_vertex_buffer);
-     * just memcpy into the persistent mapping. */
-    memcpy((char *)vulkan_state.vertex_buffer_ptrs[frame_index] + offset * sizeof(vertex_t),
-           vulkan_state.vertex_data + offset, sizeof(vertex_t) * vertex_count);
 }
 
 /* Fill a (tw+2B) x (th+2B) border-padded block at the top-left of `dst`,
@@ -3701,14 +3688,12 @@ void render_flush(void) {
      * free space) — skip the redundant full-buffer re-upload. */
     if (vulkan_state.vertex_flushed == vulkan_state.vertex_count) return;
 
-    /* Upload vertex data to GPU (per-frame buffer to avoid CPU-GPU race).
-     * Only the new slice [vertex_flushed, vertex_count) is uploaded, at its
-     * absolute offset in the device buffer. Earlier slices are never
-     * touched, so every vkCmdDraw recorded this frame reads valid data when
-     * the queue executes at frame end. Total copy work per frame is
-     * O(frame size). */
+    /* Vertex data for the new slice [vertex_flushed, vertex_count) was
+     * already written in place (render_push_tris writes through the mapped
+     * per-frame buffer). Earlier slices are never touched, so every
+     * vkCmdDraw recorded this frame reads valid data when the queue
+     * executes at frame end. Nothing to copy. */
     uint32_t flushed_count = vulkan_state.vertex_count - vulkan_state.vertex_flushed;
-    upload_vertex_buffer(f, vulkan_state.vertex_flushed, flushed_count);
 
     /* Count stats (mirrors GL reference render_flush). Vertices are pushed 3
      * at a time (one per triangle), so the new slice is flushed_count/3
@@ -3964,11 +3949,24 @@ void render_push_tris(tris_t tris, uint16_t texture_index) {
     if (vulkan_state.textures_len == 0) return;
     error_if(texture_index >= vulkan_state.textures_len, "Invalid texture %d", texture_index);
 
+    /* Vertices are written straight into the active frame's mapped vertex
+     * buffer — no host-side mirror. Outside a frame (before the first
+     * prepare, after render_frame_end, or on a prepare that skipped this
+     * frame) command_buffer is NULL and there is no recording target, so
+     * drop immediately; those vertices were discarded before too (flush
+     * dropped them, or the next prepare reset the counts before anything
+     * drew them). Inside a frame, slot frame_index is already quiesced:
+     * prepare CPU-waits on its timeline value before the frame's first
+     * push, so no in-flight GPU read races these writes. */
+    if (vulkan_state.command_buffer == VK_NULL_HANDLE) return;
+    vertex_t *dst = (vertex_t *)vulkan_state.vertex_buffer_ptrs[vulkan_state.frame_index];
+
     if (vulkan_state.vertex_count + 3 > RENDER_TRIS_BUFFER_CAPACITY * 3) {
         render_flush();
         /* Flush is cumulative (it never frees space); drop overflow triangles
-         * so we never write past the end of vertex_data. Warn once so an
-         * oversized frame is visible instead of silently losing geometry. */
+         * so we never write past the end of the mapped vertex buffer. Warn
+         * once so an oversized frame is visible instead of silently losing
+         * geometry. */
         if (vulkan_state.vertex_count + 3 > RENDER_TRIS_BUFFER_CAPACITY * 3) {
             static bool vertex_overflow_warned = false;
             if (!vertex_overflow_warned) {
@@ -3990,7 +3988,7 @@ void render_push_tris(tris_t tris, uint16_t texture_index) {
         vertex_t v = tris.vertices[i];
         v.uv.x = (v.uv.x + (float)t->offset.x) / atlas_size;
         v.uv.y = (v.uv.y + (float)t->offset.y) / atlas_size;
-        vulkan_state.vertex_data[vulkan_state.vertex_count++] = v;
+        dst[vulkan_state.vertex_count++] = v;
     }
 }
 
