@@ -967,8 +967,22 @@ void game_reset_championship(void) {
 	g.lives = NUM_LIVES;
 }
 
+// The HUD's FPS/MS readouts (hud.c DRAW_STATS_*) report the real presented-
+// frame interval — the time between successive game_update() entries — NOT
+// the CPU work time of game_update() itself. Everything that actually paces
+// frames runs outside this function: the Vulkan fence-wait + swapchain
+// acquire in render_frame_prepare() (before), vkQueuePresentKHR /
+// SDL_GL_SwapWindow and the frame limiter's sleep (after). Measuring only
+// the work time made the meter read ~3000 "fps" on Vulkan no matter what
+// VSYNC / FRAME LIMIT were set to. The inter-entry delta necessarily spans
+// all those waits.
+static double frame_last_entry_time = 0;
+
 void game_update(void) {
 	double frame_start_time = platform_now();
+	double frame_interval = frame_last_entry_time > 0
+		? frame_start_time - frame_last_entry_time : 0.0;
+	frame_last_entry_time = frame_start_time;
 
 	int sh = render_size().y;
 	int scale = max(1, sh >=  720 ? sh / 360 : sh / 240);
@@ -1009,10 +1023,10 @@ void game_update(void) {
 		printf("wrote save.dat\n");
 	}
 
-	double now = platform_now();
-	g.frame_time = now - frame_start_time;
-	if (g.frame_time > 0) {
-		g.frame_rate = ((double)g.frame_rate * 0.95) + (1.0/g.frame_time) * 0.05;
+	// First frame has no predecessor yet; leave the readouts untouched.
+	if (frame_interval > 0) {
+		g.frame_time = frame_interval;
+		g.frame_rate = ((double)g.frame_rate * 0.95) + (1.0/frame_interval) * 0.05;
 	}
 	
 	// The only drawing left here should be the post process
