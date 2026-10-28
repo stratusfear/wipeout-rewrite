@@ -2131,10 +2131,21 @@ static void make_image_layout_barrier(VkImage image, VkImageLayout old_layout, V
 
     /* COLOR_ATTACHMENT uses COLOR_ATTACHMENT_OUTPUT stage.
      * src_stage: COLOR_ATTACHMENT → COLOR_ATTACHMENT needs COLOR_ATTACHMENT_OUTPUT;
-     * SHADER_READ_ONLY → COLOR_ATTACHMENT needs FRAGMENT_SHADER. */
+     * SHADER_READ_ONLY → COLOR_ATTACHMENT needs FRAGMENT_SHADER.
+     * UNDEFINED → COLOR_ATTACHMENT (swapchain images right after acquire):
+     * also COLOR_ATTACHMENT_OUTPUT, not TOP_OF_PIPE. The frame submit waits
+     * on the acquire semaphore with pWaitDstStageMask =
+     * COLOR_ATTACHMENT_OUTPUT_BIT, and that wait only establishes an
+     * execution dependency for operations at (or before) that stage. A
+     * layout transition is a write to the whole image; with src_stage =
+     * TOP_OF_PIPE the transition is outside the semaphore's coverage and
+     * synchronization validation reports SYNC-HAZARD-WRITE-AFTER-READ
+     * against the implicit read performed by vkAcquireNextImageKHR. */
     if (new_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
         dst_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        if (old_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        if (old_layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+            src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        } else if (old_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
             src_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         } else if (old_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
             src_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
@@ -4112,6 +4123,29 @@ static void atlas_to_transfer_dst(VkCommandBuffer cb) {
         vkCmdClearColorImage_fn(cb, vulkan_state.atlas_image,
                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                 &black, ATLAS_MIP_LEVELS, ranges);
+
+        /* The layout-transition barrier above only covers the shader-read ->
+         * transfer-write dependency for the layout change itself. The clear
+         * writes every mip; the level-0 copies that follow in this same CB
+         * are additional transfer writes that need an explicit write ->
+         * write dependency against the clear (synchronization validation:
+         * SYNC-HAZARD-WRITE-AFTER-WRITE otherwise fires on each
+         * vkCmdCopyBufferToImage). Layout stays TRANSFER_DST on both sides. */
+        VkImageMemoryBarrier post_clear = {0};
+        post_clear.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        post_clear.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        post_clear.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        post_clear.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        post_clear.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        post_clear.image = vulkan_state.atlas_image;
+        post_clear.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        post_clear.subresourceRange.levelCount = ATLAS_MIP_LEVELS;
+        post_clear.subresourceRange.layerCount = 1;
+        post_clear.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        post_clear.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier_fn(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                0, NULL, 0, NULL, 1, &post_clear);
     }
 }
 
