@@ -857,7 +857,11 @@ void game_init(void) {
 			 * overlap an appended field — so each appended field keeps
 			 * its compiled-in default. Mark the save dirty so the next
 			 * write migrates the file to the current size. Fields must
-			 * only ever be APPENDED to save_t for this to hold. */
+			 * only ever be APPENDED to save_t for this to hold. NOTE:
+			 * this migration is ONE-WAY — upstream wipeout-rewrite
+			 * binaries only accept their exact save_t size and would
+			 * reject the migrated (larger) file with "unexpected size"
+			 * and fall back to defaults; that is accepted for this fork. */
 			memcpy(&save, save_file, (size_t)(size < (uint32_t)offsetof(save_t, vsync)
 				? size : (uint32_t)offsetof(save_t, vsync)));
 			save.is_dirty = true;

@@ -463,11 +463,14 @@ static struct vulkan_state {
      * vkQueueWaitIdle — the only point where destroying the old swapchain /
      * backbuffer is safe (no in-flight command buffer references them). */
     int swapchain_recreate_pending;
-    /* VSync preference (render_set_vsync): true = FIFO_RELAXED if offered
-     * else FIFO (the mode guaranteed to exist); false = MAILBOX if offered
-     * else FIFO. Read by choose_present_mode at each swapchain creation;
-     * changing it flags swapchain_recreate_pending. Default true, matching
-     * the GL backend's swap-interval-1 default. */
+    /* VSync preference (render_set_vsync): true = FIFO (the mode
+     * guaranteed to exist — plain FIFO, NOT FIFO_RELAXED, for strict GL
+     * parity: GL swap interval 1 blocks on vblank, so a late frame waits
+     * and is never shown torn, while FIFO_RELAXED displays a late frame
+     * immediately, i.e. tears); false = MAILBOX if offered else FIFO.
+     * Read by choose_present_mode at each swapchain creation; changing it
+     * flags swapchain_recreate_pending. Default true, matching the GL
+     * backend's swap-interval-1 default. */
     int vsync;
     int backbuffer_recreate_pending;
     /* VRAM-pressure fallback bookkeeping (deferred recreate step 2 in
@@ -488,6 +491,22 @@ static struct vulkan_state {
      * which is also true during ordinary geometry changes (window resize,
      * resolution toggle) where nothing failed and "restored" would lie. */
     int backbuffer_in_fallback;
+
+    /* Persistent SUBOPTIMAL extent-mismatch guard. The acquire/present
+     * SUBOPTIMAL branches recreate only while swapchain_extent disagrees
+     * with screen_size. If the SURFACE itself permanently reports an
+     * extent that differs from the SDL drawable size (surface clamp,
+     * quirky compositor scaling), a recreate can never resolve it and
+     * the flag would re-fire every frame. Record the (screen_size,
+     * resulting extent) pair the last completed swapchain recreate
+     * settled on: while a SUBOPTIMAL mismatch shows that same pair,
+     * stand down — another identical recreate cannot change the outcome.
+     * A screen_size change implicitly clears the guard (the recorded
+     * pair no longer matches) and the next SUBOPTIMAL retries once.
+     * persist_logged prints the situation once per recorded pair. */
+    VkExtent2D suboptimal_persist_extent;
+    vec2i_t suboptimal_persist_screen;   /* (0,0) = no recorded pair */
+    int suboptimal_persist_logged;
 
     /* Pipeline state */
     VkPipelineLayout pipeline_layout;      /* game pipelines: VERTEX push range */
@@ -1763,9 +1782,13 @@ static VkPresentModeKHR choose_present_mode(VkPhysicalDevice physical_device, Vk
     vkGetPhysicalDeviceSurfacePresentModesKHR_fn(physical_device, surface, &mode_count, modes);
 
     /* VSync setting selects the present mode:
-     *  - vsync ON: FIFO_RELAXED when the surface offers it (adaptive:
-     *    paces to the refresh like FIFO but tears instead of stalling
-     *    when a frame lands late), else FIFO.
+     *  - vsync ON: plain FIFO — strict GL parity. GL's swap interval 1
+     *    blocks the swap until vblank, so a frame that misses the vblank
+     *    deadline is simply held one vblank longer and never shown torn.
+     *    FIFO models exactly that. FIFO_RELAXED (adaptive vsync) would
+     *    instead present a late frame immediately, tearing between
+     *    vblanks — a behavior the GL backend never exhibits, so it is
+     *    deliberately NOT selected even when the surface offers it.
      *  - vsync OFF: MAILBOX when offered — the presentation engine
      *    replaces its single pending present with each new one instead
      *    of queueing behind earlier presents, so a frame rendered before
@@ -1786,7 +1809,7 @@ static VkPresentModeKHR choose_present_mode(VkPhysicalDevice physical_device, Vk
      *    surface that cannot make forward progress (e.g. minimized) yields
      *    VK_TIMEOUT and a skipped frame instead of a hang, per
      *    VUID-vkAcquireNextImageKHR-surface-07783. */
-    VkPresentModeKHR want = vulkan_state.vsync ? VK_PRESENT_MODE_FIFO_RELAXED_KHR
+    VkPresentModeKHR want = vulkan_state.vsync ? VK_PRESENT_MODE_FIFO_KHR
                                                : VK_PRESENT_MODE_MAILBOX_KHR;
     for (uint32_t i = 0; i < mode_count; i++) {
         if (modes[i] == want) {
@@ -3177,6 +3200,20 @@ static uint32_t stale_acquire_ood = 0, stale_acquire_sub = 0;
 static uint32_t stale_present_ood = 0, stale_present_sub = 0;
 static bool suboptimal_accepted_logged = false;
 
+/* True while the CURRENT SUBOPTIMAL extent mismatch equals the pair the
+ * last completed swapchain recreate already produced for the CURRENT
+ * screen_size: the surface itself is producing that extent, so another
+ * identical recreate cannot fix it and must not be re-flagged. Any
+ * screen_size change makes the recorded pair stop matching, which
+ * re-arms one recreate attempt. */
+static bool suboptimal_mismatch_is_persistent(void) {
+    return vulkan_state.suboptimal_persist_screen.x > 0 &&
+           vulkan_state.suboptimal_persist_screen.x == vulkan_state.screen_size.x &&
+           vulkan_state.suboptimal_persist_screen.y == vulkan_state.screen_size.y &&
+           vulkan_state.suboptimal_persist_extent.width == vulkan_state.swapchain_extent.width &&
+           vulkan_state.suboptimal_persist_extent.height == vulkan_state.swapchain_extent.height;
+}
+
 /* Presentation-stall heartbeat: time of the last successful present and
  * the last acquire/present results. Once the renderer goes 2 s without a
  * successful present, render_frame_end prints a state snapshot every 5 s
@@ -3277,6 +3314,22 @@ void render_frame_prepare(void) {
                 destroy_swapchain_resources(old_swapchain, old_images,
                                             old_views, old_count);
                 vulkan_state.swapchain_recreate_pending = false;
+
+                /* Persistent-mismatch guard bookkeeping: if even this
+                 * fresh swapchain's extent disagrees with the SDL size,
+                 * remember the pair so the SUBOPTIMAL branches stop
+                 * re-flagging recreates this surface can never resolve;
+                 * a matching extent clears any earlier pair. */
+                if (vulkan_state.swapchain_extent.width != (uint32_t)vulkan_state.screen_size.x ||
+                    vulkan_state.swapchain_extent.height != (uint32_t)vulkan_state.screen_size.y) {
+                    vulkan_state.suboptimal_persist_extent = vulkan_state.swapchain_extent;
+                    vulkan_state.suboptimal_persist_screen = vulkan_state.screen_size;
+                    vulkan_state.suboptimal_persist_logged = false;
+                }
+                else {
+                    vulkan_state.suboptimal_persist_screen.x = 0;
+                    vulkan_state.suboptimal_persist_screen.y = 0;
+                }
 
                 /* Storm detector: a geometry change legitimately costs a few
                  * recreates; a long streak of recreates that never settle
@@ -3533,11 +3586,27 @@ void render_frame_prepare(void) {
          * frame is a storm the compositor never resolves. The GL path does
          * not act on suboptimal surface states at all. A genuine scale
          * change disagrees, so then also flag the NATIVE-resolution
-         * backbuffer — matching the present path's handling. */
+         * backbuffer — matching the present path's handling. A mismatch
+         * that a completed recreate already reproduced for this
+         * screen_size is persistent (the surface itself reports that
+         * extent): stand down until the window size changes. */
         if (vulkan_state.swapchain_extent.width != (uint32_t)vulkan_state.screen_size.x ||
             vulkan_state.swapchain_extent.height != (uint32_t)vulkan_state.screen_size.y) {
-            vulkan_state.swapchain_recreate_pending = true;
-            vulkan_state.backbuffer_recreate_pending = true;
+            if (suboptimal_mismatch_is_persistent()) {
+                if (!vulkan_state.suboptimal_persist_logged) {
+                    vulkan_state.suboptimal_persist_logged = true;
+                    printf("Vulkan: SUBOPTIMAL extent %ux%u != SDL size %dx%d was "
+                           "produced by the last recreate too; keeping this swapchain "
+                           "until the window size changes\n",
+                           vulkan_state.swapchain_extent.width,
+                           vulkan_state.swapchain_extent.height,
+                           vulkan_state.screen_size.x, vulkan_state.screen_size.y);
+                }
+            }
+            else {
+                vulkan_state.swapchain_recreate_pending = true;
+                vulkan_state.backbuffer_recreate_pending = true;
+            }
         }
         stale_acquire_sub++;
     } else if (acquire_result == VK_TIMEOUT || acquire_result == VK_NOT_READY) {
@@ -3978,11 +4047,25 @@ void render_frame_end(void) {
          * size; an extent that already matches cannot be improved by a
          * recreate that would build an identical swapchain, and flagging
          * one every frame is the resize-recreate storm. The GL renderer
-         * ignores suboptimal surface states entirely. */
+         * ignores suboptimal surface states entirely. Same persistent-
+         * mismatch stand-down as the acquire path. */
         if (vulkan_state.swapchain_extent.width != (uint32_t)vulkan_state.screen_size.x ||
             vulkan_state.swapchain_extent.height != (uint32_t)vulkan_state.screen_size.y) {
-            vulkan_state.swapchain_recreate_pending = true;
-            vulkan_state.backbuffer_recreate_pending = true;
+            if (suboptimal_mismatch_is_persistent()) {
+                if (!vulkan_state.suboptimal_persist_logged) {
+                    vulkan_state.suboptimal_persist_logged = true;
+                    printf("Vulkan: SUBOPTIMAL extent %ux%u != SDL size %dx%d was "
+                           "produced by the last recreate too; keeping this swapchain "
+                           "until the window size changes\n",
+                           vulkan_state.swapchain_extent.width,
+                           vulkan_state.swapchain_extent.height,
+                           vulkan_state.screen_size.x, vulkan_state.screen_size.y);
+                }
+            }
+            else {
+                vulkan_state.swapchain_recreate_pending = true;
+                vulkan_state.backbuffer_recreate_pending = true;
+            }
         } else if (!suboptimal_accepted_logged) {
             suboptimal_accepted_logged = true;
             printf("Vulkan: surface reports SUBOPTIMAL at the correct extent "
