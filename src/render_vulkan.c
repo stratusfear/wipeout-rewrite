@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <SDL.h>
 #include <vulkan/vulkan.h>
 #include <SDL_vulkan.h>
@@ -2507,84 +2506,53 @@ static void destroy_atlas(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Shader module loading (SPIR-V)                                      */
+/* Shader modules (SPIR-V, embedded at compile time)                   */
 /* ------------------------------------------------------------------ */
 
-static VkShaderModule load_shader_module(const char *filename) {
-    char path[600];
-    /* Resolve relative to the executable instead of the CWD so the game
-     * works from any directory: the build places wipeout and shaders/
-     * side by side under build/. */
-    char exe_dir[512];
-    ssize_t len = readlink("/proc/self/exe", exe_dir, sizeof(exe_dir) - 1);
-    if (len <= 0 || len >= (ssize_t)sizeof(exe_dir)) {
-        die("Failed to resolve executable path for shader lookup");
-    }
-    exe_dir[len] = '\0';
-    char *slash = strrchr(exe_dir, '/');
-    if (!slash) {
-        die("Unexpected executable path: %s", exe_dir);
-    }
-    *slash = '\0';
-    int path_len = snprintf(path, sizeof(path), "%s/%s", exe_dir, filename);
-    if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
-        die("Shader path too long: %s/%s", exe_dir, filename);
-    }
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        fprintf(stderr, "Failed to open shader file: %s\n", path);
-        return VK_NULL_HANDLE;
-    }
+/* CMake compiles each .spvasrc source in src/shaders with `glslc -mfmt=c`,
+ * which
+ * emits a bare SPIR-V initializer list ({0x...,...}); including one as
+ * the initializer of an array embeds the module in the binary. No
+ * runtime shader files, no executable-path resolution. */
+static const uint32_t spv_game_vert[] =
+#include "shaders/game.vert.spvasrc.spvh"
+;
+static const uint32_t spv_game_frag[] =
+#include "shaders/game.frag.spvasrc.spvh"
+;
+static const uint32_t spv_post_vert[] =
+#include "shaders/post.vert.spvasrc.spvh"
+;
+static const uint32_t spv_post_frag[] =
+#include "shaders/post.frag.spvasrc.spvh"
+;
+static const uint32_t spv_post_crt_frag[] =
+#include "shaders/post_crt.frag.spvasrc.spvh"
+;
 
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fprintf(stderr, "Failed to seek in shader file: %s\n", path);
-        fclose(f);
-        return VK_NULL_HANDLE;
-    }
-    long size = ftell(f);
-    if (size <= 0) {
-        fprintf(stderr, "Failed to determine shader file size: %s\n", path);
-        fclose(f);
-        return VK_NULL_HANDLE;
-    }
-    fseek(f, 0, SEEK_SET);
+#define SPV_WORD_COUNT(name) (sizeof(name) / sizeof((name)[0]))
 
-    unsigned char *spv = (unsigned char *)malloc((size_t)size);
-    if (!spv) {
-        fprintf(stderr, "Failed to allocate %ld bytes for shader: %s\n", size, path);
-        fclose(f);
-        return VK_NULL_HANDLE;
-    }
-    if (fread(spv, 1, (size_t)size, f) != (size_t)size) {
-        fprintf(stderr, "Failed to read shader file: %s\n", path);
-        free(spv);
-        fclose(f);
-        return VK_NULL_HANDLE;
-    }
-    fclose(f);
-
-    VkShaderModule shader_module;
+static VkShaderModule load_shader_module(const uint32_t *code, size_t word_count) {
     VkShaderModuleCreateInfo create_info = {0};
     create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    create_info.codeSize = size;
-    create_info.pCode = (const uint32_t *)spv;
+    create_info.codeSize = word_count * sizeof(uint32_t);
+    create_info.pCode = code;
 
+    VkShaderModule shader_module;
     if (vkCreateShaderModule_fn(vulkan_state.device, &create_info, NULL, &shader_module) != VK_SUCCESS) {
-        free(spv);
         return VK_NULL_HANDLE;
     }
-
-    free(spv);
     return shader_module;
 }
 
 /* Create one post-process pipeline (fullscreen quad, no depth, no blend)
  * from the shared post.vert and the given fragment shader. The caller
  * owns and passes the vert module; the frag module is owned here. */
-static VkPipeline create_post_pipeline(VkShaderModule vert, const char *frag_spv) {
-    VkShaderModule frag = load_shader_module(frag_spv);
+static VkPipeline create_post_pipeline(VkShaderModule vert, const char *frag_name,
+                                       const uint32_t *frag_code, size_t frag_words) {
+    VkShaderModule frag = load_shader_module(frag_code, frag_words);
     if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE) {
-        fprintf(stderr, "Failed to load post shaders (%s)\n", frag_spv);
+        fprintf(stderr, "Failed to load post shaders (%s)\n", frag_name);
         if (frag != VK_NULL_HANDLE) {
             vkDestroyShaderModule_fn(vulkan_state.device, frag, NULL);
         }
@@ -2708,7 +2676,7 @@ static VkPipeline create_post_pipeline(VkShaderModule vert, const char *frag_spv
     vkDestroyShaderModule_fn(vulkan_state.device, frag, NULL);
 
     if (result != VK_SUCCESS || pipeline == VK_NULL_HANDLE) {
-        fprintf(stderr, "Failed to create post pipeline (%s)\n", frag_spv);
+        fprintf(stderr, "Failed to create post pipeline (%s)\n", frag_name);
         return VK_NULL_HANDLE;
     }
     return pipeline;
@@ -2952,8 +2920,8 @@ static bool create_pipelines(void) {
      * (see game_pipelines); render_flush issues the matching vkCmdSet*
      * after each bind. --- */
     {
-        VkShaderModule vert = load_shader_module("shaders/game.vert.spvasrc.spv");
-        VkShaderModule frag = load_shader_module("shaders/game.frag.spvasrc.spv");
+        VkShaderModule vert = load_shader_module(spv_game_vert, SPV_WORD_COUNT(spv_game_vert));
+        VkShaderModule frag = load_shader_module(spv_game_frag, SPV_WORD_COUNT(spv_game_frag));
         if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE) {
             fprintf(stderr, "Failed to load game shaders\n");
             vkDestroyShaderModule_fn(vulkan_state.device, vert, NULL);
@@ -2987,18 +2955,23 @@ static bool create_pipelines(void) {
      * post_pipelines[RENDER_POST_NONE] = plain copy (GL default),
      * post_pipelines[RENDER_POST_CRT]   = CRT effect. --- */
     {
-        VkShaderModule vert = load_shader_module("shaders/post.vert.spvasrc.spv");
+        VkShaderModule vert = load_shader_module(spv_post_vert, SPV_WORD_COUNT(spv_post_vert));
         if (vert == VK_NULL_HANDLE) {
             fprintf(stderr, "Failed to load post shaders\n");
             return false;
         }
 
-        const char *post_frag_spvs[NUM_RENDER_POST_EFFECTS] = {
-            "shaders/post.frag.spvasrc.spv",
-            "shaders/post_crt.frag.spvasrc.spv",
+        struct {
+            const char *name;
+            const uint32_t *code;
+            size_t words;
+        } post_frag_spvs[NUM_RENDER_POST_EFFECTS] = {
+            {"post.frag", spv_post_frag, SPV_WORD_COUNT(spv_post_frag)},
+            {"post_crt.frag", spv_post_crt_frag, SPV_WORD_COUNT(spv_post_crt_frag)},
         };
         for (int i = 0; i < NUM_RENDER_POST_EFFECTS; i++) {
-            vulkan_state.post_pipelines[i] = create_post_pipeline(vert, post_frag_spvs[i]);
+            vulkan_state.post_pipelines[i] = create_post_pipeline(
+                vert, post_frag_spvs[i].name, post_frag_spvs[i].code, post_frag_spvs[i].words);
             if (vulkan_state.post_pipelines[i] == VK_NULL_HANDLE) {
                 vkDestroyShaderModule_fn(vulkan_state.device, vert, NULL);
                 return false;

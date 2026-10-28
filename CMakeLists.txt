@@ -233,7 +233,15 @@ elseif("${RENDERER}" STREQUAL "VULKAN")
 	target_compile_definitions(wipeout PRIVATE "RENDERER_VULKAN")
 	target_sources(wipeout PRIVATE src/render_vulkan.c)
 	
-	# Compile GLSL shaders to SPIR-V
+	# Compile GLSL shaders to SPIR-V, embedded into the binary as C
+	# initializer-list headers (render_vulkan.c #includes them as array
+	# initializers — no runtime shader files, no path resolution).
+	# -O: shader code optimization. Note: deliberately NO
+	# --target-env=vulkan1.3 — at that target glslang pre-declares SPIR-V
+	# Capability DemoteToHelperInvocation in every fragment module (even
+	# where unused), which VVL rejects unless the matching device feature
+	# is negotiated. The sources use no 1.3 shader features, and plain -O
+	# output validates clean against --target-env vulkan1.3.
 	set(SHADER_SOURCES
 		src/shaders/game.vert.spvasrc
 		src/shaders/game.frag.spvasrc
@@ -244,7 +252,7 @@ elseif("${RENDERER}" STREQUAL "VULKAN")
 	set(COMPILED_SHADERS "")
 	foreach(shader_src ${SHADER_SOURCES})
 		get_filename_component(shader_name ${shader_src} NAME)
-		set(shader_out "${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader_name}.spv")
+		set(shader_out "${CMAKE_CURRENT_BINARY_DIR}/shaders/${shader_name}.spvh")
 		
 		# Detect shader stage from filename
 		set(SHADER_STAGE "vert")
@@ -255,13 +263,17 @@ elseif("${RENDERER}" STREQUAL "VULKAN")
 		add_custom_command(
 			OUTPUT "${shader_out}"
 			COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/shaders"
-			COMMAND ${GLSLC} -fshader-stage=${SHADER_STAGE} "${CMAKE_SOURCE_DIR}/${shader_src}" -o "${shader_out}"
+			COMMAND ${GLSLC} -mfmt=c -O -fshader-stage=${SHADER_STAGE} "${CMAKE_SOURCE_DIR}/${shader_src}" -o "${shader_out}"
 			VERBATIM
 			DEPENDS "${CMAKE_SOURCE_DIR}/${shader_src}"
 		)
 		list(APPEND COMPILED_SHADERS "${shader_out}")
 	endforeach()
 	add_custom_target(vulkan_shaders ALL DEPENDS ${COMPILED_SHADERS})
+	# render_vulkan.c #includes the generated headers: make sure the shader
+	# target runs (and the headers exist) before wipeout is compiled.
+	add_dependencies(wipeout vulkan_shaders)
+	target_include_directories(wipeout PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 	
 	target_include_directories(wipeout PRIVATE ${Vulkan_INCLUDE_DIRS})
 	target_link_libraries(wipeout PUBLIC ${Vulkan_LIBRARIES})
