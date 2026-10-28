@@ -291,6 +291,11 @@ typedef struct {
 
 	char highscores_name[4];
 	highscores_t highscores[NUM_RACE_CLASSES][NUM_CIRCUITS][NUM_HIGHSCORE_TABS];
+
+	// Appended fields keep the pre-existing layout byte-identical; older
+	// save files load as a prefix (game.c) and get these defaults.
+	int vsync;    // 1 = sync presents to the display refresh (default), 0 = off
+	int max_fps;  // 0 = no frame cap from the menu (UNLIMITED), else the fps
 } save_t;
 
 

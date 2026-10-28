@@ -38,6 +38,10 @@ void render_cleanup(void);
 void render_set_screen_size(vec2i_t size);
 void render_set_resolution(render_resolution_t res);
 void render_set_post_effect(render_post_effect_t post);
+// Present pacing: on = sync to display refresh (Vulkan: FIFO_RELAXED/FIFO,
+// GL: swap interval 1), off = uncapped within the presentation engine
+// (Vulkan: MAILBOX, GL: swap interval 0). Software/null backends ignore it.
+void render_set_vsync(bool enabled);
 vec2i_t render_size(void);
 
 void render_frame_prepare(void);

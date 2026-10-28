@@ -186,6 +186,16 @@ void platform_set_fullscreen(bool fullscreen) {
 	sapp_show_mouse(!fullscreen);
 }
 
+void platform_set_vsync(bool enabled) {
+	// sokol_app exposes no swap-interval control; sokol's own pacing
+	// (sapp interval) is fixed at startup.
+	(void) enabled;
+}
+void platform_set_fps_limit(int fps) {
+	// sapp drives its own frame loop; no limiter hook here.
+	(void) fps;
+}
+
 void platform_handle_event(const sapp_event* ev) {
 	// Detect ALT+Enter press to toggle fullscreen
 	if (

@@ -8,6 +8,12 @@ vec2i_t platform_screen_size(void);
 double platform_now(void);
 bool platform_get_fullscreen(void);
 void platform_set_fullscreen(bool fullscreen);
+// GL only: SDL_GL_SetSwapInterval; no-op for other renderers/platforms.
+void platform_set_vsync(bool enabled);
+// Main-loop frame cap (renderer-independent): fps > 0 caps at that rate;
+// 0 caps at just under the display refresh (vsync pacing the plan's
+// "target just under it"). Negative or implausible rates are treated as 0.
+void platform_set_fps_limit(int fps);
 void platform_set_audio_mix_cb(void (*cb)(float *buffer, uint32_t len));
 
 bool platform_asset_exists(const char *name);

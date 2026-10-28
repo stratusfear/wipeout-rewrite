@@ -308,6 +308,23 @@ static void toggle_screen_shake(menu_t *menu, int data) {
 	save.is_dirty = true;
 }
 
+static void toggle_vsync(menu_t *menu, int data) {
+	save.vsync = data;
+	save.is_dirty = true;
+	render_set_vsync(data);
+}
+
+// FRAME LIMIT stores the actual fps in save.max_fps (0 = UNLIMITED); the
+// menu runs over this list, so value<->index needs the table both ways.
+static const char *opts_fps[] = {"UNLIMITED", "30", "60", "120", "144", "240"};
+static const int fps_values[] = {0, 30, 60, 120, 144, 240};
+
+static void toggle_max_fps(menu_t *menu, int data) {
+	save.max_fps = fps_values[data];
+	save.is_dirty = true;
+	platform_set_fps_limit(save.max_fps);
+}
+
 static const char *opts_off_on[] = {"OFF", "ON"};
 static const char *opts_roll[] = {"0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100"};
 static const char *opts_ui_sizes[] = {"AUTO", "1X", "2X", "3X", "4X"};
@@ -327,6 +344,15 @@ static void page_options_video_init(menu_t *menu) {
 
 	#ifndef __EMSCRIPTEN__
 		menu_page_add_toggle(page, save.fullscreen, "FULLSCREEN", opts_off_on, len(opts_off_on), toggle_fullscreen);
+		int fps_sel = 0;
+		for (int i = 0; i < len(fps_values); i++) {
+			if (fps_values[i] == save.max_fps) {
+				fps_sel = i;
+				break;
+			}
+		}
+		menu_page_add_toggle(page, save.vsync, "VSYNC", opts_off_on, len(opts_off_on), toggle_vsync);
+		menu_page_add_toggle(page, fps_sel, "FRAME LIMIT", opts_fps, len(opts_fps), toggle_max_fps);
 	#endif
 	menu_page_add_toggle(page, save.internal_roll * 10, "INTERNAL VIEW ROLL", opts_roll, len(opts_roll), toggle_internal_roll);
 	menu_page_add_toggle(page, save.screen_shake * 2, "SCREEN SHAKE", opts_screen_shake, len(opts_screen_shake), toggle_screen_shake);

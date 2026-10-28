@@ -27,6 +27,7 @@
 
 #include "system.h"
 #include "render.h"
+#include "platform.h"
 #include "mem.h"
 #include "utils.h"
 
@@ -571,6 +572,12 @@ void render_set_resolution(render_resolution_t res) {
 void render_set_post_effect(render_post_effect_t post) {
 	error_if(post < 0 || post >= NUM_RENDER_POST_EFFECTS, "Invalid post effect %d", post);
 	prg_post = prg_post_effects[post];
+}
+
+void render_set_vsync(bool enabled) {
+	// GL pacing is a property of the SDL context (created by the platform),
+	// so the request is forwarded there. swap interval 1 = FIFO-paced.
+	platform_set_vsync(enabled);
 }
 
 vec2i_t render_size(void) {

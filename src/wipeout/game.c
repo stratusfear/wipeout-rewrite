@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stddef.h>
 
 #include "../mem.h"
 #include "../utils.h"
@@ -592,6 +593,8 @@ save_t save = {
 	.fullscreen = false,
 	.screen_res = 0,
 	.post_effect = 0,
+	.vsync = 1,    // ON (GL parity: swap interval 1 was always the default)
+	.max_fps = 0,  // 0 = UNLIMITED (see VIDEO OPTIONS FRAME LIMIT)
 
 	.has_rapier_class = true,  // for testing; should be false in prod
 	.has_bonus_circuits = true, // for testing; should be false in prod
@@ -847,6 +850,20 @@ void game_init(void) {
 			printf("load save data success\n");
 			memcpy(&save, save_file, sizeof(save_t));
 		}
+		else if (size >= (uint32_t)offsetof(save_t, vsync) && size < (uint32_t)sizeof(save_t) &&
+		         save_file->magic == SAVE_DATA_MAGIC) {
+			/* Older save layout (before the appended vsync/max_fps
+			 * fields): copy only the common prefix — never bytes that
+			 * overlap an appended field — so each appended field keeps
+			 * its compiled-in default. Mark the save dirty so the next
+			 * write migrates the file to the current size. Fields must
+			 * only ever be APPENDED to save_t for this to hold. */
+			memcpy(&save, save_file, (size_t)(size < (uint32_t)offsetof(save_t, vsync)
+				? size : (uint32_t)offsetof(save_t, vsync)));
+			save.is_dirty = true;
+			printf("load save data success (migrated %u -> %u bytes)\n",
+			       size, (uint32_t)sizeof(save_t));
+		}
 		else {
 			printf("unexpected size/magic for save data\n");
 		}
@@ -856,6 +873,8 @@ void game_init(void) {
 	platform_set_fullscreen(save.fullscreen);
 	render_set_resolution(save.screen_res);
 	render_set_post_effect(save.post_effect);
+	render_set_vsync(save.vsync);
+	platform_set_fps_limit(save.max_fps);
 
 	srand((int)(platform_now() * 100));
 	

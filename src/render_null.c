@@ -18,6 +18,9 @@ void render_set_resolution(render_resolution_t res) {
 void render_set_post_effect(render_post_effect_t post) {
 	(void) post;
 }
+void render_set_vsync(bool enabled) {
+	(void) enabled;
+}
 vec2i_t render_size(void) {
 	return vec2i(0, 0);
 }

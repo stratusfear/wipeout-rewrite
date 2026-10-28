@@ -20,6 +20,12 @@ bool platform_get_fullscreen(void) {
 void platform_set_fullscreen(bool fullscreen) {
 	(void) fullscreen;
 }
+void platform_set_vsync(bool enabled) {
+	(void) enabled;
+}
+void platform_set_fps_limit(int fps) {
+	(void) fps;
+}
 void platform_set_audio_mix_cb(void (*cb)(float *buffer, uint32_t len)) {
 	(void) cb;
 }

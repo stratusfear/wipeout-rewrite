@@ -455,6 +455,12 @@ static struct vulkan_state {
      * vkQueueWaitIdle — the only point where destroying the old swapchain /
      * backbuffer is safe (no in-flight command buffer references them). */
     int swapchain_recreate_pending;
+    /* VSync preference (render_set_vsync): true = FIFO_RELAXED if offered
+     * else FIFO (the mode guaranteed to exist); false = MAILBOX if offered
+     * else FIFO. Read by choose_present_mode at each swapchain creation;
+     * changing it flags swapchain_recreate_pending. Default true, matching
+     * the GL backend's swap-interval-1 default. */
+    int vsync;
     int backbuffer_recreate_pending;
 
     /* Pipeline state */
@@ -637,6 +643,9 @@ uint16_t RENDER_NO_TEXTURE;
 
 void render_init(vec2i_t screen_size) {
     vulkan_state.screen_size = screen_size;
+    /* Vsync ON by default (matches the GL backend's swap-interval-1
+     * default); game_init() immediately applies save.vsync. */
+    vulkan_state.vsync = true;
 
     /* Load Vulkan entry point from SDL, which is linked against the same
      * libvulkan as the rest of the process. */
@@ -1696,12 +1705,22 @@ static VkPresentModeKHR choose_present_mode(VkPhysicalDevice physical_device, Vk
     VkPresentModeKHR *modes = (VkPresentModeKHR *)calloc(mode_count, sizeof(VkPresentModeKHR));
     vkGetPhysicalDeviceSurfacePresentModesKHR_fn(physical_device, surface, &mode_count, modes);
 
-    /* Prefer MAILBOX when the surface offers it: the presentation engine
-     * replaces its single pending present with each new one instead of
-     * queueing behind earlier presents, so a frame rendered before vsync is
-     * not delayed by frames queued ahead of it (FIFO can waste a present).
+    /* VSync setting selects the present mode:
+     *  - vsync ON: FIFO_RELAXED when the surface offers it (adaptive:
+     *    paces to the refresh like FIFO but tears instead of stalling
+     *    when a frame lands late), else FIFO.
+     *  - vsync OFF: MAILBOX when offered — the presentation engine
+     *    replaces its single pending present with each new one instead
+     *    of queueing behind earlier presents, so a frame rendered before
+     *    vsync is not delayed by frames queued ahead of it; never tears.
+     *    (Capped MAILBOX is not adaptive vsync: it can repeat or skip
+     *    frames when a cap and the refresh are not aligned — the menu's
+     *    frame limiter provides the cap.) Without MAILBOX, FIFO.
+     * FIFO is the only mode guaranteed to be offered, so both paths end
+     * there.
      *
-     * The classic MAILBOX acquire deadlock does not apply here:
+     * The classic MAILBOX acquire deadlock does not apply even in the
+     * vsync-OFF mode:
      *  - acquire happens while we hold no swapchain image — the timeline
      *    wait above guarantees this slot's previous submit completed, so
      *    image_acquired_semaphores[f] has no pending wait and is free to be
@@ -1709,12 +1728,13 @@ static VkPresentModeKHR choose_present_mode(VkPhysicalDevice physical_device, Vk
      *  - the acquire timeout is finite (see render_frame_prepare), so a
      *    surface that cannot make forward progress (e.g. minimized) yields
      *    VK_TIMEOUT and a skipped frame instead of a hang, per
-     *    VUID-vkAcquireNextImageKHR-surface-07783.
-     * Fall back to FIFO — the only mode guaranteed to be offered. */
+     *    VUID-vkAcquireNextImageKHR-surface-07783. */
+    VkPresentModeKHR want = vulkan_state.vsync ? VK_PRESENT_MODE_FIFO_RELAXED_KHR
+                                               : VK_PRESENT_MODE_MAILBOX_KHR;
     for (uint32_t i = 0; i < mode_count; i++) {
-        if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+        if (modes[i] == want) {
             free(modes);
-            return VK_PRESENT_MODE_MAILBOX_KHR;
+            return want;
         }
     }
     free(modes);
@@ -1812,7 +1832,8 @@ static bool create_swapchain(VkSwapchainKHR old_swapchain) {
     }
     VkPresentModeKHR present_mode = choose_present_mode(vulkan_state.physical_device, vulkan_state.surface);
     printf("Vulkan: swapchain present mode: %s\n",
-           present_mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO");
+           present_mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" :
+           present_mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "FIFO_RELAXED" : "FIFO");
 
     /* Sync screen_size to swapchain_extent — on Wayland screen_size may be
      * 0×0 from SDL_GetDrawableSize() before the window is mapped, but the
@@ -3767,6 +3788,15 @@ void render_set_screen_size(vec2i_t size) {
 void render_set_post_effect(render_post_effect_t post) {
     error_if(post < 0 || post >= NUM_RENDER_POST_EFFECTS, "Invalid post effect %d", post);
     vulkan_state.current_post_effect = post;
+}
+
+void render_set_vsync(bool enabled) {
+    if (vulkan_state.vsync != (int)enabled) {
+        vulkan_state.vsync = enabled;
+        /* Present mode is baked into the swapchain; flag the deferred
+         * recreation in render_frame_prepare to re-run choose_present_mode. */
+        vulkan_state.swapchain_recreate_pending = true;
+    }
 }
 
 vec2i_t render_size(void) { return vulkan_state.backbuffer_size; }

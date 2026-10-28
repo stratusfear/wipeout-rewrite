@@ -231,6 +231,59 @@ void platform_set_fullscreen(bool fullscreen) {
 	}
 }
 
+void platform_set_vsync(bool enabled) {
+	#if defined(RENDERER_GL)
+		// GL pacing lives where the GL context lives (platform_video_init
+		// created it). Other renderers pace in their own backend (Vulkan:
+		// present mode) or not at all (software/null).
+		SDL_GL_SetSwapInterval(enabled ? 1 : 0);
+	#endif
+	(void)enabled;
+}
+
+// ---------------------------------------------------------------------------
+// Frame limiter (renderer-independent, so it caps GL/SW/VK alike).
+// The menu's FRAME LIMIT maps to frame_limit_fps; 0 means "UNLIMITED",
+// which still targets just under the display refresh so an unpaced
+// swapchain/swap-interval-ignored loop (GL ignores SDL_GL_SetSwapInterval
+// on some drivers) does not spin at thousands of fps. Sleep for most of
+// the remaining frame time, then spin the last ~2ms: SDL_Delay granularity
+// is ~1ms (and coarser on some platforms), so pure sleeping drifts.
+
+static int frame_limit_fps = 0;
+
+void platform_set_fps_limit(int fps) {
+	frame_limit_fps = fps > 0 ? fps : 0;
+}
+
+static void platform_limit_frame(double frame_start) {
+	int fps = frame_limit_fps;
+	if (fps == 0) {
+		int display = SDL_GetWindowDisplayIndex(window);
+		SDL_DisplayMode mode;
+		if (SDL_GetCurrentDisplayMode(display, &mode) == 0 && mode.refresh_rate > 0) {
+			// "Target just under it" — never later than the refresh
+			// interval, but a hair early so a fast frame never queues
+			// an extra lap around the loop.
+			fps = (int)((double)mode.refresh_rate * 0.99);
+			if (fps < 1) fps = mode.refresh_rate;
+		}
+		else {
+			return; // no refresh rate known: no cap
+		}
+	}
+
+	double budget = 1.0 / (double)fps;
+	double deadline = frame_start + budget;
+	double now;
+	while ((now = platform_now()) < deadline - 0.002) {
+		SDL_Delay(1);
+	}
+	while ((now = platform_now()) < deadline) {
+		// busy-wait the last couple of ms for frame-time precision
+	}
+}
+
 void platform_audio_callback(void* userdata, uint8_t* stream, int len) {
 	if (audio_callback) {
 		audio_callback((float *)stream, len/sizeof(float));
@@ -466,10 +519,12 @@ int main(int argc, char *argv[]) {
 	system_init();
 
 	while (!wants_to_exit) {
+		double frame_start = platform_now();
 		platform_pump_events();
 		platform_prepare_frame();
 		system_update();
 		platform_end_frame();
+		platform_limit_frame(frame_start);
 	}
 
 	system_cleanup();
