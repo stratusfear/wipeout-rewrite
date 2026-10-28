@@ -4207,7 +4207,13 @@ static void atlas_generate_mips_and_finish(VkCommandBuffer cb,
         b.subresourceRange.baseMipLevel = i;
         b.subresourceRange.levelCount = 1;
         b.subresourceRange.layerCount = 1;
-        b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        /* srcAccessMask must describe accesses the image's current layout
+         * can actually perform: blit-source levels (TRANSFER_SRC_OPTIMAL)
+         * only ever read, only the top blit-destination level
+         * (TRANSFER_DST_OPTIMAL) wrote. Requesting the other bit is a
+         * best-practices violation (over-broad dependency). */
+        b.srcAccessMask = (i < ATLAS_MIP_LEVELS - 1) ? VK_ACCESS_TRANSFER_READ_BIT :
+                                                       VK_ACCESS_TRANSFER_WRITE_BIT;
         b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier_fn(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                 0, 0, NULL, 0, NULL, 1, &b);
