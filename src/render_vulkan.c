@@ -3107,8 +3107,13 @@ void render_frame_prepare(void) {
         /* SUBOPTIMAL is a SUCCESS code: an image HAS been acquired and the
          * acquire semaphore is signaled, so render this frame normally. The
          * surface is no longer optimal (e.g. display scale changed), so flag
-         * the swapchain for recreation before the next frame. */
+         * the swapchain for recreation before the next frame. A scale change
+         * also moves the NATIVE-resolution backbuffer target, so flag it too
+         * — create_swapchain re-syncs screen_size to the new extent but only
+         * a backbuffer_recreate_pending resize re-allocates the backbuffer,
+         * matching the present path's SUBOPTIMAL/OUT_OF_DATE handling. */
         vulkan_state.swapchain_recreate_pending = true;
+        vulkan_state.backbuffer_recreate_pending = true;
     } else if (acquire_result == VK_TIMEOUT || acquire_result == VK_NOT_READY) {
         /* No image available within the timeout (e.g. window minimized and
          * the presentation engine stopped releasing images). Skip this
