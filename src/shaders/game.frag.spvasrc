@@ -5,13 +5,10 @@ layout(location = 1) in vec4 v_color;
 
 layout(location = 0) out vec4 out_color;
 
-layout(push_constant) uniform PushConstants {
-    mat4 u_mvp;
-    vec4 u_mv_row0;
-    vec4 u_mv_row1;
-    vec4 u_mv_row2;
-    vec2 u_screen;
-} pc;
+/* No push constants here: the game pass push block (MVP, view*model rows,
+ * screen offset) is consumed by game.vert only. The earlier copy of the
+ * vertex-stage block was never referenced and has been removed so the
+ * pipeline layout can declare the range for the vertex stage alone. */
 
 layout(set = 0, binding = 0) uniform sampler2D u_texture;
 

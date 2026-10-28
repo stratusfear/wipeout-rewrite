@@ -95,7 +95,6 @@ static PFN_vkWaitSemaphores                         vkWaitSemaphores_fn;
 static PFN_vkCreateCommandPool                      vkCreateCommandPool_fn;
 static PFN_vkDestroyCommandPool                     vkDestroyCommandPool_fn;
 static PFN_vkAllocateCommandBuffers                 vkAllocateCommandBuffers_fn;
-static PFN_vkResetCommandBuffer                     vkResetCommandBuffer_fn;
 static PFN_vkResetCommandPool                       vkResetCommandPool_fn;
 static PFN_vkCmdBindPipeline                        vkCmdBindPipeline_fn;
 static PFN_vkCmdSetViewport                         vkCmdSetViewport_fn;
@@ -216,8 +215,6 @@ static bool load_device_functions(VkDevice device, VkInstance instance) {
     if (!vkDestroyCommandPool_fn) { fprintf(stderr, "Failed to load vkDestroyCommandPool\n"); return false; }
     vkAllocateCommandBuffers_fn = (PFN_vkAllocateCommandBuffers)load_device_fn(device, instance, "vkAllocateCommandBuffers");
     if (!vkAllocateCommandBuffers_fn) { fprintf(stderr, "Failed to load vkAllocateCommandBuffers\n"); return false; }
-    vkResetCommandBuffer_fn = (PFN_vkResetCommandBuffer)load_device_fn(device, instance, "vkResetCommandBuffer");
-    if (!vkResetCommandBuffer_fn) { fprintf(stderr, "Failed to load vkResetCommandBuffer\n"); return false; }
     vkResetCommandPool_fn = (PFN_vkResetCommandPool)load_device_fn(device, instance, "vkResetCommandPool");
     if (!vkResetCommandPool_fn) { fprintf(stderr, "Failed to load vkResetCommandPool\n"); return false; }
     vkCmdBindPipeline_fn = (PFN_vkCmdBindPipeline)load_device_fn(device, instance, "vkCmdBindPipeline");
@@ -464,7 +461,8 @@ static struct vulkan_state {
     int backbuffer_recreate_pending;
 
     /* Pipeline state */
-    VkPipelineLayout pipeline_layout;
+    VkPipelineLayout pipeline_layout;      /* game pipelines: VERTEX push range */
+    VkPipelineLayout post_pipeline_layout; /* post pipelines: FRAGMENT push range */
     /* Game-pass pipelines: one per blend mode. Depth test/write and cull mode
      * are dynamic state (extendedDynamicState, Vulkan 1.3 core) — issued
      * per-flush via vkCmdSet* after the pipeline bind in render_flush. Front
@@ -568,6 +566,21 @@ static struct vulkan_state {
     #define ATLAS_MIP_LEVELS 12 /* 2048 -> 1x1 mip chain (mirrors GL glGenerateMipmap) */
 
 } vulkan_state;
+
+/* Checked queue idle. Every wait site is a resource-teardown or recreate
+ * point; a failure means the device is gone or pending work never finished,
+ * and proceeding with teardown on a dead device is safe (destroys are
+ * no-ops then) — so log loudly instead of crashing or ignoring. */
+static void queue_wait_idle(const char *where) {
+    VkResult r = vkQueueWaitIdle_fn(vulkan_state.graphics_queue);
+    if (r == VK_ERROR_DEVICE_LOST) {
+        fprintf(stderr, "Vulkan: device lost at %s\n", where);
+    }
+    else if (r != VK_SUCCESS) {
+        fprintf(stderr, "Vulkan: vkQueueWaitIdle failed at %s (%d)\n",
+                where, (int)r);
+    }
+}
 
 /* Billboard rotation for render_push_sprite: rebuilt from camera angles in
  * render_set_view so sprite quads always face the camera (mirrors the static
@@ -1112,7 +1125,8 @@ void render_init(vec2i_t screen_size) {
         VkCommandPoolCreateInfo pool_ci = {0};
         pool_ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         pool_ci.queueFamilyIndex = vulkan_state.graphics_queue_family;
-        pool_ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        /* No RESET_COMMAND_BUFFER_BIT: frame command buffers are recycled by
+         * resetting the whole pool (render_frame_prepare), never individually. */
 
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
             if (vkCreateCommandPool_fn(vulkan_state.device, &pool_ci, NULL,
@@ -1433,7 +1447,14 @@ void render_init(vec2i_t screen_size) {
         }
 
         void *data;
-        vkMapMemory_fn(vulkan_state.device, vulkan_state.quad_vertex_buffer_memory, 0, sizeof(quad_vertices), 0, &data);
+        if (vkMapMemory_fn(vulkan_state.device, vulkan_state.quad_vertex_buffer_memory, 0, sizeof(quad_vertices), 0, &data) != VK_SUCCESS) {
+            fprintf(stderr, "Failed to map quad vertex buffer memory\n");
+            vkFreeMemory_fn(vulkan_state.device, vulkan_state.quad_vertex_buffer_memory, NULL);
+            vkDestroyBuffer_fn(vulkan_state.device, vulkan_state.quad_vertex_buffer, NULL);
+            vulkan_state.quad_vertex_buffer = VK_NULL_HANDLE;
+            vulkan_state.quad_vertex_buffer_memory = VK_NULL_HANDLE;
+            goto cleanup;
+        }
         memcpy(data, quad_vertices, sizeof(quad_vertices));
         vkUnmapMemory_fn(vulkan_state.device, vulkan_state.quad_vertex_buffer_memory);
     }
@@ -1446,7 +1467,7 @@ void render_init(vec2i_t screen_size) {
     }
 
     /* Wait for all GPU work from temp command buffers during init to complete */
-    vkQueueWaitIdle_fn(vulkan_state.graphics_queue);
+    queue_wait_idle("init (temp command buffers)");
 
     /* Command buffer is allocated lazily in render_frame_prepare (first
      * frame) rather than here, so that init-time GPU work (atlas creation,
@@ -1487,7 +1508,16 @@ void render_cleanup(void) {
     }
 
     /* Wait for device idle before cleanup */
-    vkQueueWaitIdle_fn(vulkan_state.graphics_queue);
+    queue_wait_idle("cleanup");
+
+    /* Free pixel copies of uploads that were still queued when the renderer
+     * shut down (pending_uploads[].pixels are malloc'd copies, see
+     * render_texture_create). */
+    for (uint32_t i = 0; i < vulkan_state.pending_uploads_len; i++) {
+        free(vulkan_state.pending_uploads[i].pixels);
+        vulkan_state.pending_uploads[i].pixels = NULL;
+    }
+    vulkan_state.pending_uploads_len = 0;
 
     /* Destroy pipelines */
     destroy_pipelines();
@@ -1503,8 +1533,8 @@ void render_cleanup(void) {
             vulkan_state.image_acquired_semaphores[i] = VK_NULL_HANDLE;
         }
     }
-    /* Render-complete semaphores: one per swapchain image (16 max) */
-    for (uint32_t i = 0; i < 16; i++) {
+    /* Render-complete semaphores: one per swapchain image */
+    for (uint32_t i = 0; i < MAX_SWAPCHAIN_IMAGES; i++) {
         if (vulkan_state.render_complete_semaphores[i] != VK_NULL_HANDLE) {
             vkDestroySemaphore_fn(vulkan_state.device, vulkan_state.render_complete_semaphores[i], NULL);
             vulkan_state.render_complete_semaphores[i] = VK_NULL_HANDLE;
@@ -2684,7 +2714,7 @@ static VkPipeline create_post_pipeline(VkShaderModule vert, const char *frag_nam
     pi.pRasterizationState = &rast;
     pi.pColorBlendState = &cb;
     pi.pDynamicState = &dyn;
-    pi.layout = vulkan_state.pipeline_layout;
+    pi.layout = vulkan_state.post_pipeline_layout;
     pi.subpass = 0;
 
     VkPipelineMultisampleStateCreateInfo ms = {0};
@@ -2909,28 +2939,44 @@ static VkPipeline create_game_pipeline(VkShaderModule vert, VkShaderModule frag,
 }
 
 static bool create_pipelines(void) {
-    /* Create pipeline layout */
+    /* Pipeline layouts — one pair of (set layout, push range) per pass.
+     * Two separate layouts because a single layout holding both a VERTEX
+     * (0..120) and a FRAGMENT (0..16) range cannot be pushed to per-stage:
+     * VUID-vkCmdPushConstants-offset-01796 requires a push covering a byte
+     * to include every stage of every range overlapping that byte, and the
+     * two passes use disjoint byte windows only by accident of layout. */
     VkPipelineLayoutCreateInfo layout_ci = {0};
     layout_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layout_ci.setLayoutCount = 1;
     layout_ci.pSetLayouts = &vulkan_state.descriptor_set_layout;
 
-    /* Single push constant range covering all shader stages.
-     * Game pass push block: mat4 u_mvp (64) + 3x vec4 view*model rows (48)
-     * + vec2 u_screen (8) = 120 bytes.
-     * Post pass push block: vec2 u_resolution (8) + float u_time (4) = 12 bytes.
-     * Both fit within this single 120-byte range. */
-    VkPushConstantRange push_range = {0};
-    push_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    push_range.offset = 0;
-    push_range.size = 120; /* 64 (MVP) + 48 (view*model rows) + 8 (screen) */
+    /* Game pass push block (game.vert only; game.frag has no push block):
+     * mat4 u_mvp (64) + 3x vec4 view*model rows (48) + vec2 u_screen (8)
+     * = 120 bytes. */
+    VkPushConstantRange game_push_range = {0};
+    game_push_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    game_push_range.offset = 0;
+    game_push_range.size = 120; /* 64 (MVP) + 48 (view*model rows) + 8 (screen) */
 
-    VkPushConstantRange push_ranges[1] = {push_range};
     layout_ci.pushConstantRangeCount = 1;
-    layout_ci.pPushConstantRanges = push_ranges;
+    layout_ci.pPushConstantRanges = &game_push_range;
 
     if (vkCreatePipelineLayout_fn(vulkan_state.device, &layout_ci, NULL, &vulkan_state.pipeline_layout) != VK_SUCCESS) {
         fprintf(stderr, "Failed to create pipeline layout\n");
+        return false;
+    }
+
+    /* Post pass push block (post.frag / post_crt.frag; post.vert has none):
+     * vec2 u_resolution (8) + float u_time (4) = 12, pushed as 16. */
+    VkPushConstantRange post_push_range = {0};
+    post_push_range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    post_push_range.offset = 0;
+    post_push_range.size = 16; /* vec2 resolution + float time (+ pad) */
+
+    layout_ci.pPushConstantRanges = &post_push_range;
+
+    if (vkCreatePipelineLayout_fn(vulkan_state.device, &layout_ci, NULL, &vulkan_state.post_pipeline_layout) != VK_SUCCESS) {
+        fprintf(stderr, "Failed to create post pipeline layout\n");
         return false;
     }
 
@@ -3011,6 +3057,10 @@ static void destroy_pipelines(void) {
         vkDestroyPipelineLayout_fn(vulkan_state.device, vulkan_state.pipeline_layout, NULL);
         vulkan_state.pipeline_layout = VK_NULL_HANDLE;
     }
+    if (vulkan_state.post_pipeline_layout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout_fn(vulkan_state.device, vulkan_state.post_pipeline_layout, NULL);
+        vulkan_state.post_pipeline_layout = VK_NULL_HANDLE;
+    }
     for (int b = 0; b < 2; b++) {
         if (vulkan_state.game_pipelines[b] != VK_NULL_HANDLE) {
             vkDestroyPipeline_fn(vulkan_state.device, vulkan_state.game_pipelines[b], NULL);
@@ -3055,7 +3105,7 @@ void render_frame_prepare(void) {
      * render_frame_end, so render_frame_end's guard skips it); the next
      * prepare retries. Uploads stay pending across the skip. */
     if (vulkan_state.swapchain_recreate_pending || vulkan_state.backbuffer_recreate_pending) {
-        vkQueueWaitIdle_fn(vulkan_state.graphics_queue);
+        queue_wait_idle("deferred swapchain/backbuffer recreate");
 
         /* Step 1: swapchain (if pending). create_swapchain() re-syncs
          * screen_size to the extent the driver actually reports, so the
@@ -3225,12 +3275,13 @@ void render_frame_prepare(void) {
         return;
     }
 
-    /* Reset per-frame command pool, then reset the command buffer
-     * so it is in recording state. */
+    /* Reset per-frame command pool. Pool reset puts the pool's command
+     * buffers back into the freshly-allocated (not recording, no contents)
+     * state, which is exactly what the explicit per-buffer reset used to do
+     * again — that call was redundant and has been removed, along with the
+     * pool's RESET_COMMAND_BUFFER_BIT flag (no individual command buffer
+     * resets remain for this pool). */
     vkResetCommandPool_fn(vulkan_state.device, vulkan_state.command_pools[f], 0);
-    if (vulkan_state.command_buffers[f] != VK_NULL_HANDLE) {
-        vkResetCommandBuffer_fn(vulkan_state.command_buffers[f], 0);
-    }
 
     /* Allocate command buffer from per-frame pool. */
     if (vulkan_state.command_buffers[f] == VK_NULL_HANDLE) {
@@ -3463,7 +3514,7 @@ void render_frame_end(void) {
     /* Bind post descriptor set */
     VkDescriptorSet post_desc_sets[1] = {vulkan_state.backbuffer_descriptor_set};
     vkCmdBindDescriptorSets_fn(vulkan_state.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                               vulkan_state.pipeline_layout, 0, 1, post_desc_sets, 0, NULL);
+                               vulkan_state.post_pipeline_layout, 0, 1, post_desc_sets, 0, NULL);
 
     /* Push post shader constants: vec2 resolution + float time.
      * Time is in seconds, matching GL's `time = system_cycle_time()`. */
@@ -3473,9 +3524,8 @@ void render_frame_end(void) {
         (float)system_cycle_time(), /* time in seconds */
         0.0f
     };
-    vkCmdPushConstants_fn(vulkan_state.command_buffer, vulkan_state.pipeline_layout,
-                          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                          0, 16, push_constants);
+    vkCmdPushConstants_fn(vulkan_state.command_buffer, vulkan_state.post_pipeline_layout,
+                          VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, push_constants);
 
     /* Bind post pipeline (selected by current_post_effect) */
     vkCmdBindPipeline_fn(vulkan_state.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -3652,7 +3702,8 @@ void render_flush(void) {
     mat4_t mv;
     mat4_mul(&mv, &vulkan_state.current_view_mat, &vulkan_state.current_model_mat);
 
-    /* Push MVP + view*model rows + screen (120 bytes)
+    /* Push MVP + view*model rows + screen (120 bytes, vertex stage only —
+     * see the pipeline layout's push ranges)
      * Shader layout: mat4(64) + 3x vec4(48) + vec2(8) = 120 */
     float push_constants[30] = {0};
     for (int i = 0; i < 16; i++) push_constants[i] = mvp.m[i];
@@ -3672,8 +3723,7 @@ void render_flush(void) {
     push_constants[29] = -(float)vulkan_state.current_screen_position.y;
 
     vkCmdPushConstants_fn(vulkan_state.command_buffer, vulkan_state.pipeline_layout,
-                          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                          0, 120, push_constants);
+                          VK_SHADER_STAGE_VERTEX_BIT, 0, 120, push_constants);
 
     /* Bind atlas descriptor set */
     VkDescriptorSet desc_sets[1] = {vulkan_state.atlas_descriptor_set};
@@ -4192,7 +4242,7 @@ void render_flush_pending_textures(void) {
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &vulkan_state.upload_command_buffer;
     VK_CHECK(vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit_info, VK_NULL_HANDLE));
-    vkQueueWaitIdle_fn(vulkan_state.graphics_queue);
+    queue_wait_idle("pending texture upload flush");
 
     /* Free the queued pixel copies (allocated in render_texture_create) */
     for (uint32_t i = 0; i < vulkan_state.pending_uploads_len; i++) {
@@ -4382,7 +4432,7 @@ void render_texture_replace_pixels(int16_t texture_index, rgba_t *pixels) {
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &vulkan_state.upload_command_buffer;
         VK_CHECK(vkQueueSubmit_fn(vulkan_state.graphics_queue, 1, &submit, VK_NULL_HANDLE));
-        vkQueueWaitIdle_fn(vulkan_state.graphics_queue);
+        queue_wait_idle("replace_pixels upload");
 
         /* Level 0 round-tripped through TRANSFER_DST_OPTIMAL and is back in
          * the tracked layout; the other levels never left it. */
