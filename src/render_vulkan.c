@@ -4212,6 +4212,10 @@ void render_set_post_effect(render_post_effect_t post) {
 }
 
 void render_set_vsync(bool enabled) {
+    /* Forward to the platform too: the frame limiter in platform_sdl.c
+     * stands down for caps at/above the refresh while vsync is pacing
+     * (GL forwards here the same way, for its swap interval). */
+    platform_set_vsync(enabled);
     if (vulkan_state.vsync != (int)enabled) {
         vulkan_state.vsync = enabled;
         /* Present mode is baked into the swapchain; flag the deferred

@@ -78,6 +78,26 @@ SDL_GameController *platform_find_gamepad(void) {
 	return NULL;
 }
 
+// ---------------------------------------------------------------------------
+// Pacing state shared with the frame limiter below: the current vsync
+// preference (render_set_vsync forwards here from both GL and Vulkan) and
+// a cached display refresh rate. The refresh is queried once at startup
+// and again on the window events that can change it (moved to another
+// display, display change, fullscreen enter/leave) — not every frame.
+static int vsync_enabled = 1;      // save.vsync default is 1; game boot pushes the real value
+static int display_refresh_hz = 0; // 0 = unknown; the limiter's vsync skip rule then cannot apply
+
+static void platform_refresh_display_rate(void) {
+	SDL_DisplayMode mode;
+	int display = SDL_GetWindowDisplayIndex(window);
+	if (display >= 0 && SDL_GetCurrentDisplayMode(display, &mode) == 0 && mode.refresh_rate > 0) {
+		display_refresh_hz = mode.refresh_rate;
+	}
+	else {
+		display_refresh_hz = 0;
+	}
+}
+
 
 void platform_pump_events(void) {
 	SDL_Event ev;
@@ -199,7 +219,23 @@ void platform_pump_events(void) {
 				ev.window.event == SDL_WINDOWEVENT_RESIZED
 			)
 		) {
+			// resize (and DPI changes) can move the window to a mode with a
+			// different refresh on some backends; update the cache, then resize
+			platform_refresh_display_rate();
 			system_resize(platform_screen_size());
+		}
+		// Events that can change which display the window is on, and with
+		// it the cached refresh rate the frame limiter consults. (OS-level
+		// fullscreen changes surface as size/display events; the game's own
+		// toggle refreshes the cache inside platform_set_fullscreen.)
+		else if (
+			ev.type == SDL_WINDOWEVENT &&
+			(
+				ev.window.event == SDL_WINDOWEVENT_MOVED ||
+				ev.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED
+			)
+		) {
+			platform_refresh_display_rate();
 		}
 	}
 }
@@ -229,9 +265,17 @@ void platform_set_fullscreen(bool fullscreen) {
 		SDL_SetWindowFullscreen(window, 0);
 		SDL_ShowCursor(SDL_ENABLE);
 	}
+	// The display mode (and with it the refresh rate) can change with the
+	// fullscreen state; SDL does not always emit a usable window event for
+	// it under every backend, so update the cache directly here as well.
+	platform_refresh_display_rate();
 }
 
 void platform_set_vsync(bool enabled) {
+	// Recorded for the frame limiter: with vsync on, the present path paces
+	// the loop, so the limiter stands down for caps at/above the refresh
+	// instead of fighting it (see platform_limit_frame).
+	vsync_enabled = enabled ? 1 : 0;
 	#if defined(RENDERER_GL)
 		// GL pacing lives where the GL context lives (platform_video_init
 		// created it). Other renderers pace in their own backend (Vulkan:
@@ -243,12 +287,22 @@ void platform_set_vsync(bool enabled) {
 
 // ---------------------------------------------------------------------------
 // Frame limiter (renderer-independent, so it caps GL/SW/VK alike).
-// The menu's FRAME LIMIT maps to frame_limit_fps; 0 means "UNLIMITED",
-// which still targets just under the display refresh so an unpaced
-// swapchain/swap-interval-ignored loop (GL ignores SDL_GL_SetSwapInterval
-// on some drivers) does not spin at thousands of fps. Sleep for most of
-// the remaining frame time, then spin the last ~2ms: SDL_Delay granularity
-// is ~1ms (and coarser on some platforms), so pure sleeping drifts.
+// The menu's FRAME LIMIT maps to frame_limit_fps; 0 means "UNLIMITED" and
+// installs no limiter at all. (The old behaviour — silently capping 0 at
+// 0.99x the display refresh — made the menu label a lie and paced the loop
+// a hair slower than the display: with vsync on, roughly every 100th
+// vblank passed with no new frame, a duplicated-frame judder about every
+// 1.7s at 60Hz.)
+// With vsync on the present path (GL swap interval, Vulkan FIFO) paces the
+// loop to the refresh rate, so an explicit cap at or above refresh cannot
+// improve on it and only risks fighting it; the limiter stands down for
+// those caps (1Hz tolerance). Caps clearly below refresh (30 on a 60Hz
+// panel) are still enforced.
+// Sleep with SDL_Delay(1) for most of the remaining frame time, then spin
+// the last ~1ms: SDL_Delay granularity is ~1ms (and coarser on some
+// platforms), so pure sleeping drifts. At high caps (budget under ~4ms)
+// the spin tail is shortened proportionally so the wait does not become
+// mostly busy-waiting.
 
 static int frame_limit_fps = 0;
 
@@ -259,28 +313,21 @@ void platform_set_fps_limit(int fps) {
 static void platform_limit_frame(double frame_start) {
 	int fps = frame_limit_fps;
 	if (fps == 0) {
-		int display = SDL_GetWindowDisplayIndex(window);
-		SDL_DisplayMode mode;
-		if (SDL_GetCurrentDisplayMode(display, &mode) == 0 && mode.refresh_rate > 0) {
-			// "Target just under it" — never later than the refresh
-			// interval, but a hair early so a fast frame never queues
-			// an extra lap around the loop.
-			fps = (int)((double)mode.refresh_rate * 0.99);
-			if (fps < 1) fps = mode.refresh_rate;
-		}
-		else {
-			return; // no refresh rate known: no cap
-		}
+		return; // "UNLIMITED": raw loop speed, or whatever the present mode paces
+	}
+	if (vsync_enabled && display_refresh_hz > 0 && fps >= display_refresh_hz - 1) {
+		return; // vsync already paces at the refresh rate; do not fight it
 	}
 
 	double budget = 1.0 / (double)fps;
 	double deadline = frame_start + budget;
+	double spin_tail = budget < 0.004 ? budget * 0.25 : 0.001;
 	double now;
-	while ((now = platform_now()) < deadline - 0.002) {
+	while ((now = platform_now()) < deadline - spin_tail) {
 		SDL_Delay(1);
 	}
 	while ((now = platform_now()) < deadline) {
-		// busy-wait the last couple of ms for frame-time precision
+		// busy-wait the last short interval for frame-time precision
 	}
 }
 
@@ -516,6 +563,7 @@ int main(int argc, char *argv[]) {
 	);
 
 	platform_video_init();
+	platform_refresh_display_rate(); // seed the limiter's refresh cache
 	system_init();
 
 	while (!wants_to_exit) {
