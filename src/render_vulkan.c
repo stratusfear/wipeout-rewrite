@@ -1786,6 +1786,23 @@ static bool create_swapchain(VkSwapchainKHR old_swapchain) {
     VkSurfaceCapabilitiesKHR caps = {0};
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR_fn(vulkan_state.physical_device, vulkan_state.surface, &caps);
 
+    vulkan_state.swapchain_extent = choose_extent(&caps, vulkan_state.screen_size);
+
+    /* Zero-extent guard: a minimized window on some platforms reports a
+     * 0x0 currentExtent (and minImageExtent follows it), and imageExtent
+     * must not be 0x0 (VUID-VkSwapchainCreateInfoKHR-imageExtent-01274).
+     * Bail before anything else — including the present-mode printf (the
+     * deferred recreate path retries every frame, so a later bail would
+     * spam it) — and before syncing screen_size below, so the previous
+     * good size is not clobbered. Callers: init fails cleanly;
+     * render_frame_prepare's deferred block keeps the recreate flags set,
+     * skips the frame and retries next frame (verified with a temporary
+     * forced 0x0 extent: no VVL errors, old swapchain intact, game alive). */
+    if (vulkan_state.swapchain_extent.width == 0 ||
+        vulkan_state.swapchain_extent.height == 0) {
+        return false;
+    }
+
     {
         VkSurfaceFormatKHR surface_format = choose_surface_format(vulkan_state.physical_device, vulkan_state.surface);
         vulkan_state.swapchain_format = surface_format.format;
@@ -1797,7 +1814,6 @@ static bool create_swapchain(VkSwapchainKHR old_swapchain) {
     VkPresentModeKHR present_mode = choose_present_mode(vulkan_state.physical_device, vulkan_state.surface);
     printf("Vulkan: swapchain present mode: %s\n",
            present_mode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO");
-    vulkan_state.swapchain_extent = choose_extent(&caps, vulkan_state.screen_size);
 
     /* Sync screen_size to swapchain_extent — on Wayland screen_size may be
      * 0×0 from SDL_GetDrawableSize() before the window is mapped, but the
