@@ -470,6 +470,24 @@ static struct vulkan_state {
      * the GL backend's swap-interval-1 default. */
     int vsync;
     int backbuffer_recreate_pending;
+    /* VRAM-pressure fallback bookkeeping (deferred recreate step 2 in
+     * render_frame_prepare): backbuffer_size may end up SMALLER than
+     * requested_size after a failed allocation chain. While it is, the
+     * recreate flag stays set and the requested size is retried at most
+     * once per backbuffer_retry_after_ms (0 = no pending throttle) — a
+     * retry that failed costs the same allocation pressure that caused
+     * the fallback. screen_size/render_res recorded at the last attempt:
+     * if either changed, this is a real geometry change and the retry is
+     * immediate (never throttled). */
+    vec2i_t backbuffer_request_screen_size;
+    render_resolution_t backbuffer_request_res;
+    uint64_t backbuffer_retry_after_ms;
+    /* True between a failed allocation chain (running at fallback size)
+     * and a retry that finally achieves the requested size. Tracks ACTUAL
+     * VRAM-fallback state, unlike a bare backbuffer_size != requested test,
+     * which is also true during ordinary geometry changes (window resize,
+     * resolution toggle) where nothing failed and "restored" would lie. */
+    int backbuffer_in_fallback;
 
     /* Pipeline state */
     VkPipelineLayout pipeline_layout;      /* game pipelines: VERTEX push range */
@@ -2316,6 +2334,13 @@ static bool create_backbuffer(void) {
                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                       &vulkan_state.backbuffer_depth_image, &vulkan_state.backbuffer_depth_image_memory)) {
+        /* Partial-failure atomicity: the color image above was already
+         * created. Undo it so a false return always means "no backbuffer
+         * allocated" — otherwise the next create_backbuffer() call would
+         * overwrite (leak) the color image, and the deferred recreate's
+         * "no render target" sentinel (backbuffer_image == NULL) would
+         * read stale. destroy_backbuffer() is null-safe on partial state. */
+        destroy_backbuffer();
         return false;
     }
 
@@ -3290,94 +3315,146 @@ void render_frame_prepare(void) {
          * "backbuffer creation failed" + heartbeat showing no successful
          * present). Recovery: retry at the PREVIOUS size — an allocation
          * that demonstrably just succeeded — so presentation keeps
-         * running at the old resolution instead of dying. */
+         * running at the old resolution instead of dying.
+         *
+         * Climb-back: when the attempt chain ends at a size smaller than
+         * requested (previous-size or shrunk fallback), the recreate flag
+         * STAYS SET and the requested size is retried at most once per
+         * second — each attempt is the same allocation pressure that
+         * caused the fallback, so per-frame retries would thrash and can
+         * starve the system. A genuine geometry change (screen_size or
+         * render_res differs from the recorded request) bypasses the
+         * throttle. The flag is cleared only once backbuffer_size equals
+         * the requested size. Every path through here ends with either a
+         * valid backbuffer or backbuffer_image == NULL + a skipped frame
+         * (create_backbuffer() is atomic on failure: it undoes partial
+         * allocations itself). */
         if (vulkan_state.backbuffer_recreate_pending) {
-            vec2i_t old_backbuffer_size = vulkan_state.backbuffer_size;
-            vec2i_t new_backbuffer_size = choose_backbuffer_size(vulkan_state.render_res, vulkan_state.screen_size);
-            destroy_backbuffer();
-            static bool backbuffer_fail_logged = false;
-            vulkan_state.backbuffer_size = new_backbuffer_size;
-            if (!create_backbuffer()) {
-                if (!backbuffer_fail_logged) {
-                    fprintf(stderr, "Vulkan: backbuffer creation failed "
-                                    "(%dx%d, VRAM pressure?); falling back to "
-                                    "previous size %dx%d and retrying the new "
-                                    "size next frame\n",
-                            new_backbuffer_size.x, new_backbuffer_size.y,
-                            old_backbuffer_size.x, old_backbuffer_size.y);
-                    backbuffer_fail_logged = true;
+            vec2i_t requested_size = choose_backbuffer_size(vulkan_state.render_res, vulkan_state.screen_size);
+            bool at_fallback_size = vulkan_state.backbuffer_size.x != requested_size.x ||
+                                    vulkan_state.backbuffer_size.y != requested_size.y;
+            bool request_changed = vulkan_state.screen_size.x != vulkan_state.backbuffer_request_screen_size.x ||
+                                   vulkan_state.screen_size.y != vulkan_state.backbuffer_request_screen_size.y ||
+                                   vulkan_state.render_res != vulkan_state.backbuffer_request_res;
+            uint64_t now_ms = SDL_GetTicks64();
+
+            if (at_fallback_size && !request_changed &&
+                vulkan_state.backbuffer_retry_after_ms != 0 &&
+                now_ms < vulkan_state.backbuffer_retry_after_ms) {
+                /* Throttled retry window: keep rendering at the fallback
+                 * size. If even the fallback could not be allocated (no
+                 * render target), skip the frame; the heartbeat in
+                 * render_frame_end reports the stall. */
+                if (vulkan_state.backbuffer_image == VK_NULL_HANDLE) {
+                    return;
                 }
-                vulkan_state.backbuffer_size = old_backbuffer_size;
+            } else {
+                vulkan_state.backbuffer_request_screen_size = vulkan_state.screen_size;
+                vulkan_state.backbuffer_request_res = vulkan_state.render_res;
+                vec2i_t old_backbuffer_size = vulkan_state.backbuffer_size;
+                destroy_backbuffer();
+                static bool backbuffer_fail_logged = false;
+                vulkan_state.backbuffer_size = requested_size;
                 if (!create_backbuffer()) {
-                    /* Even the previously-working size cannot be allocated
-                     * now (the swapchain-recreate storm of a drag-resize can
-                     * itself exhaust VRAM while the compositor retires the
-                     * old swapchains' buffers). Shrink progressively — a
-                     * visibly degraded game beats a dead one — and keep the
-                     * recreate flag set so the retry loop climbs back to the
-                     * requested size as VRAM frees (the compositor does
-                     * eventually retire the old swapchains' images). */
-                    int w = old_backbuffer_size.x, h = old_backbuffer_size.y;
-                    bool recovered = true;
-                    while (true) {
-                        w /= 2; h /= 2;
-                        if (w < 320 || h < 240) {
-                            recovered = false;
-                            break;
-                        }
-                        vulkan_state.backbuffer_size = vec2i(w, h);
-                        if (create_backbuffer()) {
-                            break;
-                        }
+                    vulkan_state.backbuffer_retry_after_ms = now_ms + 1000;
+                    vulkan_state.backbuffer_in_fallback = true;
+                    if (!backbuffer_fail_logged) {
+                        fprintf(stderr, "Vulkan: backbuffer creation failed "
+                                        "(%dx%d, VRAM pressure?); running at "
+                                        "fallback size %dx%d, retrying the "
+                                        "requested size at most once per "
+                                        "second\n",
+                                requested_size.x, requested_size.y,
+                                old_backbuffer_size.x, old_backbuffer_size.y);
+                        backbuffer_fail_logged = true;
                     }
-                    if (!recovered) {
-                        /* Keep the flag set (retries next frame) and skip
-                         * this one. The heartbeat in render_frame_end
-                         * reports the stall instead of the freeze being
-                         * silent. */
-                        return;
+                    vulkan_state.backbuffer_size = old_backbuffer_size;
+                    if (!create_backbuffer()) {
+                        /* Even the previously-working size cannot be allocated
+                         * now (the swapchain-recreate storm of a drag-resize can
+                         * itself exhaust VRAM while the compositor retires the
+                         * old swapchains' buffers). Shrink progressively — a
+                         * visibly degraded game beats a dead one. The flag
+                         * stays set (throttled), so the retry loop climbs back
+                         * to the requested size as VRAM frees (the compositor
+                         * does eventually retire the old swapchains' images). */
+                        int w = old_backbuffer_size.x, h = old_backbuffer_size.y;
+                        bool recovered = true;
+                        while (true) {
+                            w /= 2; h /= 2;
+                            if (w < 320 || h < 240) {
+                                recovered = false;
+                                break;
+                            }
+                            vulkan_state.backbuffer_size = vec2i(w, h);
+                            if (create_backbuffer()) {
+                                break;
+                            }
+                        }
+                        if (!recovered) {
+                            /* No render target at any size. Keep the flag
+                             * set (throttled retry), skip this frame; the
+                             * heartbeat reports the stall instead of the
+                             * freeze being silent. */
+                            return;
+                        }
+                        fprintf(stderr, "Vulkan: backbuffer recovered at shrunk "
+                                        "size %dx%d\n", w, h);
                     }
-                    fprintf(stderr, "Vulkan: backbuffer recovered at shrunk "
-                                    "size %dx%d\n", w, h);
+                }
+                if (!update_backbuffer_descriptor()) {
+                    if (!backbuffer_fail_logged) {
+                        fprintf(stderr, "Vulkan: backbuffer descriptor update "
+                                        "failed; retrying next frame\n");
+                        backbuffer_fail_logged = true;
+                    }
+                    return;
+                }
+                /* Atlas min filter follows the resolution (GL parity:
+                 * render_gl.c:561-568): trilinear at NATIVE, NEAREST at 240P/480P.
+                 * Re-write the existing atlas descriptor set — host-side update,
+                 * visible to this frame's (not yet recorded) game pass. */
+                {
+                    VkWriteDescriptorSet atlas_write = {0};
+                    atlas_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    atlas_write.dstSet = vulkan_state.atlas_descriptor_set;
+                    atlas_write.dstBinding = 0;
+                    atlas_write.descriptorCount = 1;
+                    atlas_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    atlas_write.pImageInfo = &(VkDescriptorImageInfo){
+                        .sampler = vulkan_state.render_res == RENDER_RES_NATIVE ?
+                                   vulkan_state.atlas_sampler : vulkan_state.atlas_nearest_sampler,
+                        .imageView = vulkan_state.atlas_image_view,
+                        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    };
+                    vkUpdateDescriptorSets_fn(vulkan_state.device, 1, &atlas_write, 0, NULL);
+                }
+                /* Projection matrices from the backbuffer size (GL parity:
+                 * render_gl.c:557-558). The 2D HUD is drawn in backbuffer space,
+                 * so it must use backbuffer_size, not screen_size — identical for
+                 * NATIVE, divergent (and wrong) for 240P/480P otherwise. */
+                if (vulkan_state.backbuffer_size.x > 0 && vulkan_state.backbuffer_size.y > 0) {
+                    vulkan_state.projection_mat_3d = render_setup_3d_projection_mat(vulkan_state.backbuffer_size);
+                    vulkan_state.projection_mat_2d = render_setup_2d_projection_mat(vulkan_state.backbuffer_size);
+                }
+                /* Only done when the REQUESTED size was actually achieved;
+                 * otherwise the flag stays set for the throttled climb-back,
+                 * and a successful climb is logged once. */
+                if (vulkan_state.backbuffer_size.x == requested_size.x &&
+                    vulkan_state.backbuffer_size.y == requested_size.y) {
+                    if (vulkan_state.backbuffer_in_fallback) {
+                        fprintf(stderr, "Vulkan: backbuffer restored to requested "
+                                        "size %dx%d\n", requested_size.x, requested_size.y);
+                    }
+                    /* Failure logging re-arms only after a success at the
+                     * requested size: while climb-back retries keep failing,
+                     * the one-shot "fallback" message must not repeat. */
+                    backbuffer_fail_logged = false;
+                    vulkan_state.backbuffer_in_fallback = false;
+                    vulkan_state.backbuffer_recreate_pending = false;
+                    vulkan_state.backbuffer_retry_after_ms = 0;
                 }
             }
-            if (!update_backbuffer_descriptor()) {
-                if (!backbuffer_fail_logged) {
-                    fprintf(stderr, "Vulkan: backbuffer descriptor update "
-                                    "failed; retrying next frame\n");
-                    backbuffer_fail_logged = true;
-                }
-                return;
-            }
-            backbuffer_fail_logged = false;
-            /* Atlas min filter follows the resolution (GL parity:
-             * render_gl.c:561-568): trilinear at NATIVE, NEAREST at 240P/480P.
-             * Re-write the existing atlas descriptor set — host-side update,
-             * visible to this frame's (not yet recorded) game pass. */
-            {
-                VkWriteDescriptorSet atlas_write = {0};
-                atlas_write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                atlas_write.dstSet = vulkan_state.atlas_descriptor_set;
-                atlas_write.dstBinding = 0;
-                atlas_write.descriptorCount = 1;
-                atlas_write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                atlas_write.pImageInfo = &(VkDescriptorImageInfo){
-                    .sampler = vulkan_state.render_res == RENDER_RES_NATIVE ?
-                               vulkan_state.atlas_sampler : vulkan_state.atlas_nearest_sampler,
-                    .imageView = vulkan_state.atlas_image_view,
-                    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                };
-                vkUpdateDescriptorSets_fn(vulkan_state.device, 1, &atlas_write, 0, NULL);
-            }
-            /* Projection matrices from the backbuffer size (GL parity:
-             * render_gl.c:557-558). The 2D HUD is drawn in backbuffer space,
-             * so it must use backbuffer_size, not screen_size — identical for
-             * NATIVE, divergent (and wrong) for 240P/480P otherwise. */
-            if (vulkan_state.backbuffer_size.x > 0 && vulkan_state.backbuffer_size.y > 0) {
-                vulkan_state.projection_mat_3d = render_setup_3d_projection_mat(vulkan_state.backbuffer_size);
-                vulkan_state.projection_mat_2d = render_setup_2d_projection_mat(vulkan_state.backbuffer_size);
-            }
-            vulkan_state.backbuffer_recreate_pending = false;
         }
     }
 
