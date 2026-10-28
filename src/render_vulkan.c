@@ -503,10 +503,23 @@ static struct vulkan_state {
      * stand down — another identical recreate cannot change the outcome.
      * A screen_size change implicitly clears the guard (the recorded
      * pair no longer matches) and the next SUBOPTIMAL retries once.
-     * persist_logged prints the situation once per recorded pair. */
+     * persist_logged prints the situation once per recorded pair.
+     *
+     * Round 5 item 2 time limit: the recorded pair can go stale without
+     * the window changing — a driver extent that merely LAGGED during an
+     * interactive resize gets recorded, and once it catches up a fresh
+     * recreate WOULD resolve the mismatch, but the guard would wedge the
+     * stale extent until the next geometry change. So the stand-down is
+     * time-limited: one recreate attempt per SUBOPTIMAL_RETRY_INTERVAL_MS
+     * (storm protection keeps the worst case at one recreate per interval
+     * instead of one per frame). An attempt that completes and still
+     * mismatches re-records the pair and restarts the interval; an
+     * attempt that matches clears the guard. persist_logged stays keyed
+     * to the pair VALUE, so the interval attempts do not re-print it. */
     VkExtent2D suboptimal_persist_extent;
     vec2i_t suboptimal_persist_screen;   /* (0,0) = no recorded pair */
     int suboptimal_persist_logged;
+    uint64_t suboptimal_retry_after_ms;  /* 0 = no recorded pair */
 
     /* Pipeline state */
     VkPipelineLayout pipeline_layout;      /* game pipelines: VERTEX push range */
@@ -3214,6 +3227,16 @@ static bool suboptimal_mismatch_is_persistent(void) {
            vulkan_state.suboptimal_persist_extent.height == vulkan_state.swapchain_extent.height;
 }
 
+/* Guard active = recorded pair still matches AND the interval since that
+ * recreate has not expired (round 5 item 2). Past the interval the next
+ * SUBOPTIMAL is allowed exactly one recreate attempt; when it completes,
+ * step 1 re-records the pair (restarting the interval) or clears it. */
+#define SUBOPTIMAL_RETRY_INTERVAL_MS 3000
+static bool suboptimal_guard_holds(void) {
+    return suboptimal_mismatch_is_persistent() &&
+           SDL_GetTicks64() < vulkan_state.suboptimal_retry_after_ms;
+}
+
 /* Presentation-stall heartbeat: time of the last successful present and
  * the last acquire/present results. Once the renderer goes 2 s without a
  * successful present, render_frame_end prints a state snapshot every 5 s
@@ -3322,13 +3345,24 @@ void render_frame_prepare(void) {
                  * a matching extent clears any earlier pair. */
                 if (vulkan_state.swapchain_extent.width != (uint32_t)vulkan_state.screen_size.x ||
                     vulkan_state.swapchain_extent.height != (uint32_t)vulkan_state.screen_size.y) {
+                    /* Logged-once is keyed to the pair VALUE (round 5 item 2):
+                     * a periodic attempt that re-records the SAME pair must
+                     * not re-print the stand-down line. */
+                    bool same_pair = vulkan_state.suboptimal_persist_screen.x == vulkan_state.screen_size.x &&
+                                     vulkan_state.suboptimal_persist_screen.y == vulkan_state.screen_size.y &&
+                                     vulkan_state.suboptimal_persist_extent.width == vulkan_state.swapchain_extent.width &&
+                                     vulkan_state.suboptimal_persist_extent.height == vulkan_state.swapchain_extent.height;
+                    if (!same_pair)
+                        vulkan_state.suboptimal_persist_logged = false;
                     vulkan_state.suboptimal_persist_extent = vulkan_state.swapchain_extent;
                     vulkan_state.suboptimal_persist_screen = vulkan_state.screen_size;
-                    vulkan_state.suboptimal_persist_logged = false;
+                    vulkan_state.suboptimal_retry_after_ms =
+                        SDL_GetTicks64() + SUBOPTIMAL_RETRY_INTERVAL_MS;
                 }
                 else {
                     vulkan_state.suboptimal_persist_screen.x = 0;
                     vulkan_state.suboptimal_persist_screen.y = 0;
+                    vulkan_state.suboptimal_retry_after_ms = 0;
                 }
 
                 /* Storm detector: a geometry change legitimately costs a few
@@ -3589,18 +3623,22 @@ void render_frame_prepare(void) {
          * backbuffer — matching the present path's handling. A mismatch
          * that a completed recreate already reproduced for this
          * screen_size is persistent (the surface itself reports that
-         * extent): stand down until the window size changes. */
+         * extent): stand down — but time-limited (round 5 item 2): one
+         * recreate attempt per SUBOPTIMAL_RETRY_INTERVAL_MS, so a surface
+         * extent that merely LAGGED during a resize can still catch up. */
         if (vulkan_state.swapchain_extent.width != (uint32_t)vulkan_state.screen_size.x ||
             vulkan_state.swapchain_extent.height != (uint32_t)vulkan_state.screen_size.y) {
-            if (suboptimal_mismatch_is_persistent()) {
+            if (suboptimal_guard_holds()) {
                 if (!vulkan_state.suboptimal_persist_logged) {
                     vulkan_state.suboptimal_persist_logged = true;
                     printf("Vulkan: SUBOPTIMAL extent %ux%u != SDL size %dx%d was "
-                           "produced by the last recreate too; keeping this swapchain "
-                           "until the window size changes\n",
+                           "produced by the last recreate too; retrying one swapchain "
+                           "recreate every %d ms (a permanent surface mismatch never "
+                           "resolves this way, but a lagging extent can)\n",
                            vulkan_state.swapchain_extent.width,
                            vulkan_state.swapchain_extent.height,
-                           vulkan_state.screen_size.x, vulkan_state.screen_size.y);
+                           vulkan_state.screen_size.x, vulkan_state.screen_size.y,
+                           SUBOPTIMAL_RETRY_INTERVAL_MS);
                 }
             }
             else {
@@ -4051,15 +4089,17 @@ void render_frame_end(void) {
          * mismatch stand-down as the acquire path. */
         if (vulkan_state.swapchain_extent.width != (uint32_t)vulkan_state.screen_size.x ||
             vulkan_state.swapchain_extent.height != (uint32_t)vulkan_state.screen_size.y) {
-            if (suboptimal_mismatch_is_persistent()) {
+            if (suboptimal_guard_holds()) {
                 if (!vulkan_state.suboptimal_persist_logged) {
                     vulkan_state.suboptimal_persist_logged = true;
                     printf("Vulkan: SUBOPTIMAL extent %ux%u != SDL size %dx%d was "
-                           "produced by the last recreate too; keeping this swapchain "
-                           "until the window size changes\n",
+                           "produced by the last recreate too; retrying one swapchain "
+                           "recreate every %d ms (a permanent surface mismatch never "
+                           "resolves this way, but a lagging extent can)\n",
                            vulkan_state.swapchain_extent.width,
                            vulkan_state.swapchain_extent.height,
-                           vulkan_state.screen_size.x, vulkan_state.screen_size.y);
+                           vulkan_state.screen_size.x, vulkan_state.screen_size.y,
+                           SUBOPTIMAL_RETRY_INTERVAL_MS);
                 }
             }
             else {
