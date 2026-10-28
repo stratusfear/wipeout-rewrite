@@ -276,7 +276,11 @@ elseif("${RENDERER}" STREQUAL "VULKAN")
 	target_include_directories(wipeout PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 	
 	target_include_directories(wipeout PRIVATE ${Vulkan_INCLUDE_DIRS})
-	target_link_libraries(wipeout PUBLIC ${Vulkan_LIBRARIES})
+	# Headers only — do NOT link libvulkan: render_vulkan.c compiles with
+	# VK_NO_PROTOTYPES and resolves every entry point at runtime
+	# (SDL_Vulkan_GetVkGetInstanceProcAddr -> vkGetInstanceProcAddr ->
+	# vkGetDeviceProcAddr), so the loader is loaded by SDL, not by us.
+	# find_package(Vulkan) still provides the headers and glslc.
 endif()
 
 if("${PLATFORM}" STREQUAL SDL2)
