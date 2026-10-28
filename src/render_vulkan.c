@@ -54,6 +54,7 @@ static PFN_vkVoidFunction vk_get_proc(const char *name, VkInstance instance) {
 static PFN_vkCreateInstance                         vkCreateInstance_fn;
 static PFN_vkDestroyInstance                        vkDestroyInstance_fn;
 static PFN_vkEnumeratePhysicalDevices               vkEnumeratePhysicalDevices_fn;
+static PFN_vkEnumerateDeviceExtensionProperties     vkEnumerateDeviceExtensionProperties_fn;
 static PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties_fn;
 static PFN_vkGetPhysicalDeviceProperties            vkGetPhysicalDeviceProperties_fn;
 static PFN_vkGetPhysicalDeviceFeatures2              vkGetPhysicalDeviceFeatures2_fn;
@@ -716,6 +717,7 @@ void render_init(vec2i_t screen_size) {
     /* -- Phase 3: Load instance functions (need valid VkInstance) -- */
     LOAD_FN_INSTANCE(vkDestroyInstance_fn, vkDestroyInstance)
     LOAD_FN_INSTANCE(vkEnumeratePhysicalDevices_fn, vkEnumeratePhysicalDevices)
+    LOAD_FN_INSTANCE(vkEnumerateDeviceExtensionProperties_fn, vkEnumerateDeviceExtensionProperties)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceQueueFamilyProperties_fn, vkGetPhysicalDeviceQueueFamilyProperties)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceProperties_fn, vkGetPhysicalDeviceProperties)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceFeatures2_fn, vkGetPhysicalDeviceFeatures2)
@@ -768,32 +770,115 @@ void render_init(vec2i_t screen_size) {
     VkPhysicalDevice *phys_devices = (VkPhysicalDevice *)calloc(pd_count, sizeof(VkPhysicalDevice));
     vkEnumeratePhysicalDevices_fn(vulkan_state.instance, &pd_count, phys_devices);
 
+    /* Select the physical device by filtering every candidate, not just by
+     * device type: a conformant loader may list devices this app cannot run
+     * (pre-1.3 drivers, devices without VK_KHR_swapchain, devices that cannot
+     * present to our surface). Rejecting inside the loop lets a 1.3-capable
+     * integrated GPU carry the app when the preferred discrete GPU is
+     * unsuitable, instead of failing after a type-only pick.
+     * Requirements per candidate:
+     *  - apiVersion >= 1.3 (core 1.3 entry points must exist),
+     *  - VK_KHR_swapchain supported (unconditionally enabled below),
+     *  - a graphics queue family that can present to the surface.
+     * Among suitable devices: DISCRETE > INTEGRATED > other types.
+     * WIPEOUT_GPU=<index> (index into this enumeration) forces one device,
+     * e.g. to override the preference order on hybrid-GPU systems; it must
+     * still pass the checks. */
+    const char **rejection = (const char **)calloc(pd_count, sizeof(const char *));
     vulkan_state.physical_device = VK_NULL_HANDLE;
+    int best_rank = -1; /* 3 discrete, 2 integrated, 1 other, 0 CPU */
+
+    int forced_index = -1;
+    const char *force_env = getenv("WIPEOUT_GPU");
+    if (force_env) {
+        char *end = NULL;
+        long v = strtol(force_env, &end, 10);
+        if (end == force_env || *end != '\0' || v < 0 || v >= (long)pd_count) {
+            fprintf(stderr, "WIPEOUT_GPU=\"%s\" is not a device index (valid: 0..%u)\n",
+                    force_env, pd_count - 1);
+            free(phys_devices);
+            free(rejection);
+            goto cleanup;
+        }
+        forced_index = (int)v;
+    }
+
     for (uint32_t i = 0; i < pd_count; i++) {
+        if (forced_index >= 0 && i != (uint32_t)forced_index) {
+            rejection[i] = "skipped (WIPEOUT_GPU override)";
+            continue;
+        }
+
         VkPhysicalDeviceProperties props = {0};
         vkGetPhysicalDeviceProperties_fn(phys_devices[i], &props);
 
-        /* Prefer discrete GPU */
-        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-            vulkan_state.physical_device = phys_devices[i];
-            break;
+        if (props.apiVersion < VK_API_VERSION_1_3) {
+            rejection[i] = "Vulkan version < 1.3";
+            continue;
         }
-        if (vulkan_state.physical_device == VK_NULL_HANDLE &&
-            props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+
+        /* Device extension support (VK_KHR_swapchain is enabled at device
+         * creation; a device without it would fail vkCreateDevice anyway). */
+        uint32_t ext_count = 0;
+        vkEnumerateDeviceExtensionProperties_fn(phys_devices[i], NULL, &ext_count, NULL);
+        VkExtensionProperties *dev_exts = (VkExtensionProperties *)calloc(ext_count, sizeof(VkExtensionProperties));
+        vkEnumerateDeviceExtensionProperties_fn(phys_devices[i], NULL, &ext_count, dev_exts);
+        bool swapchain_ext = false;
+        for (uint32_t e = 0; e < ext_count; e++) {
+            if (strcmp(dev_exts[e].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0) {
+                swapchain_ext = true;
+                break;
+            }
+        }
+        free(dev_exts);
+        if (!swapchain_ext) {
+            rejection[i] = "no VK_KHR_swapchain";
+            continue;
+        }
+
+        /* A queue family with graphics + present support must exist; the
+         * concrete family is picked after selection in step 4. */
+        uint32_t cqf_count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties_fn(phys_devices[i], &cqf_count, NULL);
+        VkQueueFamilyProperties *cqfs = (VkQueueFamilyProperties *)calloc(cqf_count, sizeof(VkQueueFamilyProperties));
+        vkGetPhysicalDeviceQueueFamilyProperties_fn(phys_devices[i], &cqf_count, cqfs);
+        bool presentable = false;
+        for (uint32_t q = 0; q < cqf_count && !presentable; q++) {
+            if (!(cqfs[q].queueFlags & VK_QUEUE_GRAPHICS_BIT)) continue;
+            VkBool32 supported = VK_FALSE;
+            vkGetPhysicalDeviceSurfaceSupportKHR_fn(phys_devices[i], q, vulkan_state.surface, &supported);
+            presentable = (supported == VK_TRUE);
+        }
+        free(cqfs);
+        if (!presentable) {
+            rejection[i] = "no graphics queue with present support";
+            continue;
+        }
+
+        int rank = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 3 :
+                   props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 2 :
+                   props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU ? 0 : 1;
+        if (rank > best_rank) {
+            best_rank = rank;
             vulkan_state.physical_device = phys_devices[i];
+            if (rank == 3) break; /* best possible; stop early */
         }
     }
 
     if (vulkan_state.physical_device == VK_NULL_HANDLE) {
-        vulkan_state.physical_device = phys_devices[0];
-    }
-
-    free(phys_devices);
-
-    if (vulkan_state.physical_device == VK_NULL_HANDLE) {
-        fprintf(stderr, "Failed to select physical device\n");
+        fprintf(stderr, "No suitable Vulkan 1.3 device among %u enumerated:\n", pd_count);
+        for (uint32_t i = 0; i < pd_count; i++) {
+            VkPhysicalDeviceProperties props = {0};
+            vkGetPhysicalDeviceProperties_fn(phys_devices[i], &props);
+            fprintf(stderr, "  [%u] %s: %s\n", i, props.deviceName,
+                    rejection[i] ? rejection[i] : "suitable");
+        }
+        free(phys_devices);
+        free(rejection);
         goto cleanup;
     }
+    free(rejection);
+    free(phys_devices);
 
     /* The instance's apiVersion (requested as 1.3 above) does not constrain
      * the devices a conformant loader may expose: pre-1.3 devices can still
@@ -803,6 +888,7 @@ void render_init(vec2i_t screen_size) {
     {
         VkPhysicalDeviceProperties pd_props = {0};
         vkGetPhysicalDeviceProperties_fn(vulkan_state.physical_device, &pd_props);
+        printf("Vulkan: selected device [%s]\n", pd_props.deviceName);
         if (pd_props.apiVersion < VK_API_VERSION_1_3) {
             fprintf(stderr, "Selected device reports Vulkan %u.%u.%u; this app requires 1.3\n",
                     VK_API_VERSION_MAJOR(pd_props.apiVersion),
