@@ -316,8 +316,8 @@ static void toggle_vsync(menu_t *menu, int data) {
 
 // FRAME LIMIT stores the actual fps in save.max_fps (0 = UNLIMITED); the
 // menu runs over this list, so value<->index needs the table both ways.
-static const char *opts_fps[] = {"UNLIMITED", "30", "60", "120", "144", "240"};
-static const int fps_values[] = {0, 30, 60, 120, 144, 240};
+static const char *opts_fps[] = {"UNLIMITED", "30", "60", "120", "140", "144", "160", "235", "240"};
+static const int fps_values[] = {0, 30, 60, 120, 140, 144, 160, 235, 240};
 
 static void toggle_max_fps(menu_t *menu, int data) {
 	save.max_fps = fps_values[data];
