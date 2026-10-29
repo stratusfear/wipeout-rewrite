@@ -507,11 +507,11 @@ int main(int argc, char *argv[]) {
 	// Video is required for startup. Everything else is best-effort, so a
 	// missing audio device or gamepad does not stop the game from running.
 	if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-		printf("Failed to initialize video: %s\n", SDL_GetError());
+		fprintf(stderr, "Failed to initialize video: %s\n", SDL_GetError());
 		return 1;
 	}
 	if (SDL_InitSubSystem(SDL_INIT_AUDIO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0) {
-		printf("Some subsystems failed to initialize: %s\n", SDL_GetError());
+		fprintf(stderr, "Some subsystems failed to initialize: %s\n", SDL_GetError());
 	}
 
 #if defined(RENDERER_VULKAN)
@@ -553,7 +553,7 @@ int main(int argc, char *argv[]) {
 	char *gcdb_path = strcat(strcpy(temp_path, path_assets), "gamecontrollerdb.txt");
 	int gcdb_res = SDL_GameControllerAddMappingsFromFile(gcdb_path);
 	if (gcdb_res < 0) {
-		printf("Failed to load gamecontrollerdb.txt\n");
+		fprintf(stderr, "Failed to load gamecontrollerdb.txt\n");
 	}
 	else {
 		printf("load gamecontrollerdb.txt\n");
@@ -581,7 +581,7 @@ int main(int argc, char *argv[]) {
 	);
 
 	if (!window) {
-		printf("Failed to create window: %s\n", SDL_GetError());
+		fprintf(stderr, "Failed to create window: %s\n", SDL_GetError());
 		return 1;
 	}
 
