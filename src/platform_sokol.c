@@ -195,6 +195,9 @@ void platform_set_fps_limit(int fps) {
 	// sapp drives its own frame loop; no limiter hook here.
 	(void) fps;
 }
+int platform_display_refresh_hz(void) {
+	return 0; // no display cache behind the sokol platform
+}
 
 void platform_handle_event(const sapp_event* ev) {
 	// Detect ALT+Enter press to toggle fullscreen

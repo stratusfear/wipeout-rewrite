@@ -978,11 +978,69 @@ void game_reset_championship(void) {
 // all those waits.
 static double frame_last_entry_time = 0;
 
+// WIPEOUT_FRAME_DIAG=<N> (env var, parsed once at first use): pacing
+// diagnostic. Every N frames, print one stderr line with count, min,
+// median, p95 and max of the presented-frame interval (ms) over the
+// just-completed window — measured at game_update() entry, so it spans
+// all pacing waits, like the HUD stats above — plus the live pacing
+// state: vsync, the frame limit and the cached display refresh rate.
+// Uses the platform monotonic clock, the same one the limiter uses.
+// Unset or non-positive: the per-frame cost is one cached check. No
+// allocation: median/p95 sort a fixed static window, and N above
+// FRAME_DIAG_MAX is clamped.
+#define FRAME_DIAG_MAX 1024
+static double frame_diag_window[FRAME_DIAG_MAX];
+static int frame_diag_len = 0;  // window size; 0 = disabled
+static int frame_diag_fill = 0;
+
+static int frame_diag_cmp(const void *a, const void *b) {
+	double da = *(const double *)a, db = *(const double *)b;
+	return da < db ? -1 : (da > db ? 1 : 0);
+}
+
+static void frame_diag_update(double interval) {
+	static bool parsed = false;
+	if (!parsed) {
+		parsed = true;
+		const char *v = getenv("WIPEOUT_FRAME_DIAG");
+		if (v && atoi(v) > 0) {
+			frame_diag_len = min(atoi(v), FRAME_DIAG_MAX);
+		}
+	}
+	if (!frame_diag_len || interval <= 0.0) {
+		return;
+	}
+	frame_diag_window[frame_diag_fill++] = interval;
+	if (frame_diag_fill < frame_diag_len) {
+		return;
+	}
+	qsort(frame_diag_window, frame_diag_fill, sizeof(double), frame_diag_cmp);
+	int n = frame_diag_fill;
+	char cap_str[16];
+	if (save.max_fps > 0) {
+		snprintf(cap_str, sizeof(cap_str), "%d", save.max_fps);
+	} else {
+		strcpy(cap_str, "UNLIMITED");
+	}
+	fprintf(stderr, "FRAME_DIAG n=%d interval_ms min=%.2f med=%.2f p95=%.2f max=%.2f"
+	        " | vsync=%s cap=%s refresh=%dHz\n",
+	        n,
+	        frame_diag_window[0] * 1000.0,
+	        frame_diag_window[n / 2] * 1000.0,
+	        frame_diag_window[(int)(0.95 * (n - 1))] * 1000.0,
+	        frame_diag_window[n - 1] * 1000.0,
+	        save.vsync ? "ON" : "OFF", cap_str,
+	        platform_display_refresh_hz());
+	fflush(stderr);
+	frame_diag_fill = 0;
+}
+
 void game_update(void) {
 	double frame_start_time = platform_now();
 	double frame_interval = frame_last_entry_time > 0
 		? frame_start_time - frame_last_entry_time : 0.0;
 	frame_last_entry_time = frame_start_time;
+	frame_diag_update(frame_interval);
 
 	int sh = render_size().y;
 	int scale = max(1, sh >=  720 ? sh / 360 : sh / 240);

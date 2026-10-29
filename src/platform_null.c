@@ -26,6 +26,9 @@ void platform_set_vsync(bool enabled) {
 void platform_set_fps_limit(int fps) {
 	(void) fps;
 }
+int platform_display_refresh_hz(void) {
+	return 0; // no display cache behind the null platform
+}
 void platform_set_audio_mix_cb(void (*cb)(float *buffer, uint32_t len)) {
 	(void) cb;
 }

@@ -310,6 +310,10 @@ void platform_set_fps_limit(int fps) {
 	frame_limit_fps = fps > 0 ? fps : 0;
 }
 
+int platform_display_refresh_hz(void) {
+	return display_refresh_hz;
+}
+
 static void platform_limit_frame(double frame_start) {
 	int fps = frame_limit_fps;
 	if (fps == 0) {

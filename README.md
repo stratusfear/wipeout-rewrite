@@ -259,6 +259,9 @@ The video options interact:
   ignored, so the limiter cannot fight the present path.
 - With `VSYNC OFF` the cap is the only pacing, and it is enforced exactly
   (measured: 60.0 fps steady at a 60 cap on a 165 Hz panel).
+- For pacing diagnostics, set the environment variable `WIPEOUT_FRAME_DIAG=<N>`:
+  every N frames the game prints the min/median/p95/max frame interval and the
+  live VSYNC / FRAME LIMIT / display-refresh state to stderr.
 
 Judder caveat: with `VSYNC ON`, a `FRAME LIMIT` below the monitor refresh
 rate that does not divide it evenly (for example 144 on a fixed-refresh

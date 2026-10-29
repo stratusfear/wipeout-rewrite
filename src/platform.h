@@ -14,6 +14,10 @@ void platform_set_vsync(bool enabled);
 // 0 caps at just under the display refresh (vsync pacing the plan's
 // "target just under it"). Negative or implausible rates are treated as 0.
 void platform_set_fps_limit(int fps);
+// Cached refresh rate (Hz) of the display the window is on, 0 if unknown.
+// Read-only; used by the limiter's vsync rule and the WIPEOUT_FRAME_DIAG
+// diagnostic (game.c).
+int platform_display_refresh_hz(void);
 void platform_set_audio_mix_cb(void (*cb)(float *buffer, uint32_t len));
 
 bool platform_asset_exists(const char *name);
