@@ -494,7 +494,15 @@ uint32_t platform_store_userdata(const char *name, void *bytes, int32_t len) {
 #endif
 
 int main(int argc, char *argv[]) {
-	SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER);
+	// Video is required for startup. Everything else is best-effort, so a
+	// missing audio device or gamepad does not stop the game from running.
+	if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+		printf("Failed to initialize video: %s\n", SDL_GetError());
+		return 1;
+	}
+	if (SDL_InitSubSystem(SDL_INIT_AUDIO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0) {
+		printf("Some subsystems failed to initialize: %s\n", SDL_GetError());
+	}
 
 #if defined(RENDERER_VULKAN)
 	/* Load Vulkan library explicitly (required on Linux before SDL_Vulkan_CreateSurface) */
@@ -561,6 +569,11 @@ int main(int argc, char *argv[]) {
 		SYSTEM_WINDOW_WIDTH, SYSTEM_WINDOW_HEIGHT,
 		SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | PLATFORM_WINDOW_FLAGS | SDL_WINDOW_ALLOW_HIGHDPI
 	);
+
+	if (!window) {
+		printf("Failed to create window: %s\n", SDL_GetError());
+		return 1;
+	}
 
 	platform_video_init();
 	platform_refresh_display_rate(); // seed the limiter's refresh cache
