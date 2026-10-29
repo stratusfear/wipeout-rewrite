@@ -3273,8 +3273,51 @@ void render_frame_prepare(void) {
      * frame (command_buffer is NULL, cleared at the end of the previous
      * render_frame_end, so render_frame_end's guard skips it); the next
      * prepare retries. Uploads stay pending across the skip. */
-    if (vulkan_state.swapchain_recreate_pending || vulkan_state.backbuffer_recreate_pending) {
-        queue_wait_idle("deferred swapchain/backbuffer recreate");
+    /* Work-due decision for the deferred block (round 5 item 1). Since the
+     * climb-back landed, backbuffer_recreate_pending STAYS SET while the
+     * renderer runs at a fallback size and retries are throttled to ~1/s.
+     * Entering this block on the bare flag ran a full vkQueueWaitIdle on
+     * every throttled frame too, serializing CPU and GPU and defeating
+     * frames-in-flight pipelining for the entire fallback period. Only an
+     * actual attempt needs the idle wait; a throttled frame renders at the
+     * fallback size without waiting and without destroying resources.
+     *
+     * The clock is read exactly HERE and step 2 must use backbuffer_attempt_due
+     * instead of re-evaluating the throttle window from a second clock read:
+     * if the retry deadline passed between the entry check and step 2, step 2
+     * would destroy + reallocate the backbuffer although no idle wait had run
+     * — use-after-free of a render target the GPU may still be reading.
+     *
+     * Staleness note: this predicate sees the pre-step-1 screen_size, and
+     * step 1 (create_swapchain) can re-sync screen_size to a driver-reported
+     * extent. A geometry change made visible only by step 1 therefore defers
+     * the backbuffer attempt by one frame (the flag is still set) — a
+     * cosmetic delay; step 2 recomputes the sizes from the possibly-updated
+     * screen_size before destroying anything, so a wrong-size allocation can
+     * never happen. */
+    uint64_t recreate_now_ms = SDL_GetTicks64();
+    bool backbuffer_attempt_due = false;
+    if (vulkan_state.backbuffer_recreate_pending) {
+        vec2i_t requested_size = choose_backbuffer_size(vulkan_state.render_res, vulkan_state.screen_size);
+        bool at_fallback_size = vulkan_state.backbuffer_size.x != requested_size.x ||
+                                vulkan_state.backbuffer_size.y != requested_size.y;
+        bool request_changed = vulkan_state.screen_size.x != vulkan_state.backbuffer_request_screen_size.x ||
+                               vulkan_state.screen_size.y != vulkan_state.backbuffer_request_screen_size.y ||
+                               vulkan_state.render_res != vulkan_state.backbuffer_request_res;
+        backbuffer_attempt_due = !(at_fallback_size && !request_changed &&
+                                   vulkan_state.backbuffer_retry_after_ms != 0 &&
+                                   recreate_now_ms < vulkan_state.backbuffer_retry_after_ms);
+    }
+    if (vulkan_state.swapchain_recreate_pending ||
+        (vulkan_state.backbuffer_recreate_pending &&
+         (backbuffer_attempt_due || vulkan_state.backbuffer_image == VK_NULL_HANDLE))) {
+        /* The idle wait is required by the swapchain path (step 1 can change
+         * screen_size and destroys swapchain resources) and by the backbuffer
+         * attempt; a throttled frame enters this block only to skip itself
+         * (NULL render target) and must not idle. */
+        if (vulkan_state.swapchain_recreate_pending || backbuffer_attempt_due) {
+            queue_wait_idle("deferred swapchain/backbuffer recreate");
+        }
 
         /* Step 1: swapchain (if pending). create_swapchain() re-syncs
          * screen_size to the extent the driver actually reports, so the
@@ -3415,19 +3458,20 @@ void render_frame_prepare(void) {
          * the requested size. Every path through here ends with either a
          * valid backbuffer or backbuffer_image == NULL + a skipped frame
          * (create_backbuffer() is atomic on failure: it undoes partial
-         * allocations itself). */
+         * allocations itself).
+         *
+         * Round 5 item 1: the throttle decision was made ONCE before the
+         * idle wait (backbuffer_attempt_due). Do NOT re-read the clock or
+         * re-evaluate the window here: if the deadline passed between the
+         * entry check and this point, destroying the backbuffer without
+         * the idle wait would race the GPU (use-after-free of a render
+         * target still in flight). requested_size IS recomputed: step 1
+         * may have re-synced screen_size, and allocating at the stale
+         * size would be a real (if cosmetic) error. */
         if (vulkan_state.backbuffer_recreate_pending) {
             vec2i_t requested_size = choose_backbuffer_size(vulkan_state.render_res, vulkan_state.screen_size);
-            bool at_fallback_size = vulkan_state.backbuffer_size.x != requested_size.x ||
-                                    vulkan_state.backbuffer_size.y != requested_size.y;
-            bool request_changed = vulkan_state.screen_size.x != vulkan_state.backbuffer_request_screen_size.x ||
-                                   vulkan_state.screen_size.y != vulkan_state.backbuffer_request_screen_size.y ||
-                                   vulkan_state.render_res != vulkan_state.backbuffer_request_res;
-            uint64_t now_ms = SDL_GetTicks64();
 
-            if (at_fallback_size && !request_changed &&
-                vulkan_state.backbuffer_retry_after_ms != 0 &&
-                now_ms < vulkan_state.backbuffer_retry_after_ms) {
+            if (!backbuffer_attempt_due) {
                 /* Throttled retry window: keep rendering at the fallback
                  * size. If even the fallback could not be allocated (no
                  * render target), skip the frame; the heartbeat in
@@ -3443,7 +3487,7 @@ void render_frame_prepare(void) {
                 static bool backbuffer_fail_logged = false;
                 vulkan_state.backbuffer_size = requested_size;
                 if (!create_backbuffer()) {
-                    vulkan_state.backbuffer_retry_after_ms = now_ms + 1000;
+                    vulkan_state.backbuffer_retry_after_ms = recreate_now_ms + 1000;
                     vulkan_state.backbuffer_in_fallback = true;
                     if (!backbuffer_fail_logged) {
                         fprintf(stderr, "Vulkan: backbuffer creation failed "
