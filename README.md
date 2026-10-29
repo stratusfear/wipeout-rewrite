@@ -248,6 +248,28 @@ Note that the blog post announcing this project may or may not provide a link to
 
 Optionally, if you want to use a game controller that may not be supported by SDL directly, you can place the [gamecontrollerdb.txt](https://github.com/gabomdq/SDL_GameControllerDB) in the root directory of this project (along the compiled `wipegame`). Note that if you want to use the analog sticks of your game controller in the game you have to configure it in the Options menu; the analog sticks are not bound by default.
 
+## Frame pacing (VSYNC and FRAME LIMIT)
+
+The video options interact:
+
+- `VSYNC ON` paces every present to the display's vertical blank (GL swap
+  interval / Vulkan FIFO), so the frame rate tracks the panel refresh.
+- `FRAME LIMIT` installs a renderer-independent deadline limiter. While
+  vsync is on, a cap at (or within 1 fps of) the measured display refresh is
+  ignored, so the limiter cannot fight the present path.
+- With `VSYNC OFF` the cap is the only pacing, and it is enforced exactly
+  (measured: 60.0 fps steady at a 60 cap on a 165 Hz panel).
+
+Judder caveat: with `VSYNC ON` and a cap clearly below the refresh rate,
+the limiter's deadline is a wall clock that is not phase-locked to the
+display's vblank. Presented frames snap to whole vblank intervals around
+that deadline, and as the two clocks drift, a frame periodically misses
+its slot and repeats one display interval later - a repeating judder. This
+shows up at caps such as 55 fps on a 165 Hz panel, or 60 fps on 120/180 Hz
+panels. For rock-solid pacing with vsync on, leave FRAME LIMIT at
+UNLIMITED (or set it at/above the refresh rate, where it stands down); if
+you need an exact cap below refresh, turn VSYNC off.
+
 # Porting
 
 For a new platform not covered by SDL, Sokol, or OpenGL, a starting point would be to run CMake with the dummy platform and renderer implementations, e.g. `-DDEV_BUILD=true -DRENDERER=NULL -DPLATFORM=NULL`. This should compile on most systems, run enough to load assets, then exit, all with just a basic C compiler and no dependencies.
