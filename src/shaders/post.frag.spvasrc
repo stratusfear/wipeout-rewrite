@@ -16,6 +16,22 @@ layout(push_constant) uniform PushConstants {
 // and the quad's v_uv.y=1 at the top of the window, so sample with
 // (v_uv.x, 1.0 - v_uv.y) to copy it through unchanged: window top -> v=0 ->
 // backbuffer row 0 (scene top), window bottom -> v=1 -> backbuffer row H.
+//
+// At exactly 1.5x downscale (480P backbuffer in a 720-row window, or 240P in
+// 360) the sampling coordinate (d+0.5)*bbH/H lands exactly on a texel boundary
+// for every third window row, and which texel a driver's NEAREST fetch picks at
+// that exact boundary differs: Mesa llvmpipe's Vulkan path fetches the upper
+// texel (source row floor((2d+1)/3), 9% of menu pixels away from the GL
+// reference), while GL and NVIDIA hardware fetch the lower texel, the
+// canonical floor(2d/3) resampling map. Shift the lookup by -0.35 window rows
+// (biased coordinate 2d/3+0.1 in texel units: reproduces the canonical map on
+// every driver measured, never within 0.1 texel rows of a boundary, so no
+// driver ties). Measured fix for the 480P GL-vs-Vulkan row divergence (rounds
+// 7/8 findings); changes no pixel on NVIDIA, and other scales produce no ties
+// and are left bit-identical.
 void main() {
-    out_color = texture(u_scene, vec2(v_uv.x, 1.0 - v_uv.y));
+    ivec2 bb_size = textureSize(u_scene, 0);
+    float bias = (bb_size.y * 3 == int(pc.u_resolution.y) * 2)
+                 ? -0.35 / pc.u_resolution.y : 0.0;
+    out_color = texture(u_scene, vec2(v_uv.x, 1.0 - v_uv.y + bias));
 }
