@@ -387,6 +387,12 @@ uint32_t platform_store_userdata(const char *name, void *bytes, int32_t len) {
 		#endif
 
 		platform_gl = SDL_GL_CreateContext(window);
+		if (!platform_gl) {
+			// A window without a GL context cannot render anything; every later
+			// GL call (including the render_init entry point) would crash.
+			fprintf(stderr, "Failed to create GL context: %s\n", SDL_GetError());
+			exit(1);
+		}
 		SDL_GL_SetSwapInterval(1);
 	}
 
