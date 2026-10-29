@@ -260,15 +260,17 @@ The video options interact:
 - With `VSYNC OFF` the cap is the only pacing, and it is enforced exactly
   (measured: 60.0 fps steady at a 60 cap on a 165 Hz panel).
 
-Judder caveat: with `VSYNC ON` and a cap clearly below the refresh rate,
-the limiter's deadline is a wall clock that is not phase-locked to the
-display's vblank. Presented frames snap to whole vblank intervals around
-that deadline, and as the two clocks drift, a frame periodically misses
-its slot and repeats one display interval later - a repeating judder. This
-shows up at caps such as 55 fps on a 165 Hz panel, or 60 fps on 120/180 Hz
-panels. For rock-solid pacing with vsync on, leave FRAME LIMIT at
-UNLIMITED (or set it at/above the refresh rate, where it stands down); if
-you need an exact cap below refresh, turn VSYNC off.
+Judder caveat: with `VSYNC ON`, a `FRAME LIMIT` below the monitor refresh
+rate that does not divide it evenly (for example 144 on a fixed-refresh
+165 Hz panel) cannot be met exactly: frames alternate between being shown
+for one refresh and for two. This comes from combining vsync with any
+limiter and is not a defect. On fixed-refresh panels pick a rate that
+divides the refresh evenly (60 on a 120 Hz or 180 Hz panel; 55 on a
+165 Hz panel) or leave the limit on UNLIMITED (or at/above the refresh
+rate, where it stands down). On a VRR display with adaptive sync actually
+active for the window, the panel follows the frame rate and the effect
+largely disappears; a limit a few fps below the panel maximum keeps it
+inside the variable-refresh range.
 
 # Porting
 
