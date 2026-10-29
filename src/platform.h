@@ -11,8 +11,9 @@ void platform_set_fullscreen(bool fullscreen);
 // GL only: SDL_GL_SetSwapInterval; no-op for other renderers/platforms.
 void platform_set_vsync(bool enabled);
 // Main-loop frame cap (renderer-independent): fps > 0 caps at that rate;
-// 0 caps at just under the display refresh (vsync pacing the plan's
-// "target just under it"). Negative or implausible rates are treated as 0.
+// with vsync on, a cap at or within 1 fps of the measured display refresh
+// stands down to the present path. 0 is "UNLIMITED" in the menu and
+// installs no limiter at all. Negative rates are treated as 0.
 void platform_set_fps_limit(int fps);
 // Cached refresh rate (Hz) of the display the window is on, 0 if unknown.
 // Read-only; used by the limiter's vsync rule and the WIPEOUT_FRAME_DIAG
