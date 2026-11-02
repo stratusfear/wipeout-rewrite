@@ -232,6 +232,8 @@ The following is a table for project specific build flags using CMake:
 
 ### Vulkan renderer
 
+**AI usage disclosure:** the Vulkan renderer (`src/render_vulkan.c`, `src/shaders/`, and the related platform and settings changes) was written mostly with Qwen3.8-Flash-Next and in part with Qwen3.8-27B, both run locally; the initial scaffolding came from Qwen3.6-35B-A3B. The code went through repeated human-directed review rounds, including review assistance from Claude (Anthropic), but it was not written by hand and the commit history does not mark which changes were AI-generated. Documentation for this backend, including [docs/VULKAN.md](docs/VULKAN.md), was also written with AI assistance. Treat it accordingly, and report problems you find.
+
 Enable it with CMake `-DRENDERER=VULKAN` (the `Makefile` does not support it); it requires the `SDL2` platform.
 
 **Build requirements:** the Vulkan headers (found via CMake's `find_package(Vulkan)`) and `glslc`, the GLSL-to-SPIR-V shader compiler; CMake aborts with an error when `glslc` is not found. Install the [Vulkan SDK](https://vulkan.lunarg.com/) or, on the distributions listed above, its parts: `libvulkan-dev` and `glslc` on Debian/Ubuntu, `vulkan-headers` `vulkan-loader-devel` and `glslc` on Fedora, `vulkan-headers` `vulkan-icd-loader` and `shaderc` on Arch Linux. The GLSL shaders are compiled to SPIR-V at build time and embedded in the binary, so no shader files ship next to the executable. The Vulkan loader is loaded at runtime through SDL, so `libvulkan` is not a link-time dependency; if it cannot be loaded the game aborts with `Failed to get vkGetInstanceProcAddr`.
