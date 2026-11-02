@@ -134,7 +134,7 @@ Recorded 2026-11-02:
 
 # Known limitations
 
-- **Platforms.** Linux only so far, with the SDL2 platform. Windows and macOS are untested; shader embedding removed the old path-handling concern, but nothing else has been built or run on those platforms.
+- **Platforms.** Linux only so far, with the SDL2 platform. Windows and macOS are untested; shader embedding removed the old path-handling concern, but nothing else has been built or run on those platforms. The code has been prepared for portability drivers (see "Windows and macOS notes") but that is read from the specification, not measured.
 - **Hardware.** A Vulkan 1.3 device with swapchain support is required. AMD and Intel GPUs are unmeasured. The texel-tie bias is driver-agnostic by construction (it removes ties rather than compensating one driver), but that generality is untested on other vendors; a single frozen capture pair at a 1080-row window on such hardware would close the gap.
 - **Present modes.** FIFO_RELAXED is deliberately unused: some Wayland drivers do not offer it, and strict FIFO matches GL's swap interval.
 - **Very large windows.** The −C/winH bias keeps working, but its shift in normalized texture coordinates shrinks with window height. By arithmetic (not measured), the worst case near the bottom of the window is about 8 float ulps at 2160 rows and about 4 at 4320, which leaves less margin against rasterizer jitter. Raising C restores margin; it must stay below 1/p for the window to backbuffer ratio (p is the reduced numerator).
@@ -143,6 +143,18 @@ Recorded 2026-11-02:
 - **Vulkan versus NVIDIA GL at texel ties** (one source row, every q-th row at certain ratios) is expected and accepted; see "Texel ties and the upscale".
 - The 240P llvmpipe raster micro-diff (0.22 to 0.30% against GL) is still uninvestigated.
 - `WIPEOUT_GPU` selects by numeric index only; a device-name substring selector is an open follow-up.
+
+# Windows and macOS notes
+
+Prepared but untested; nothing here has been built or run on those platforms.
+
+- **Portability drivers.** MoltenVK and KosmicKrisp are portability drivers. The instance enables `VK_KHR_portability_enumeration` with `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR` when the loader offers it, and the device enables `VK_KHR_portability_subset` when the selected device advertises it. Without the former, the loader can fail `vkCreateInstance` with `VK_ERROR_INCOMPATIBLE_DRIVER`. No subset-restricted feature is used by the renderer.
+- **Driver identification.** Startup prints `Vulkan: driver [name] [info]` after the selected device. Both ICDs can report the same GPU name, so this line is what tells them apart.
+- **No system loader on macOS.** Install the Vulkan SDK for development. For a shipped app, bundle the loader, the driver dylib(s) and the ICD json files; do not rely on a system install. On Windows the GPU driver package installs the loader.
+- **Minimum drivers.** MoltenVK 1.3.0 or later (older releases report Vulkan 1.1 and are rejected by the 1.3 gate with "Vulkan version < 1.3"). KosmicKrisp needs Apple Silicon and macOS 26. Intel Macs can only use MoltenVK. Test the two drivers separately.
+- **Debug builds** request `VK_EXT_debug_utils`, which the loader provides; a bundled loader without the validation layer is fine.
+- **Windows compilers.** The `LOAD_FN` macros use `typeof`, so build with clang-cl or MinGW, not MSVC `cl.exe`.
+- **Unverified.** Whether MoltenVK offers IMMEDIATE (VSYNC OFF only tries MAILBOX, then FIFO), and whether the `extendedDynamicState` feature gate holds on current Apple drivers.
 
 # Test harness methodology
 
