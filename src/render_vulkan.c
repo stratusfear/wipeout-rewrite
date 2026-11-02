@@ -1,3 +1,9 @@
+/* AI disclosure: this file was written mostly with Qwen3.8-Flash-Next and in
+ * part with Qwen3.8-27B (initial scaffolding: Qwen3.6-35B-A3B), then reviewed
+ * over repeated human-directed rounds with review assistance from Claude.
+ * Commits do not mark which changes were AI-generated. See the README
+ * ("AI usage disclosure") and docs/VULKAN.md. */
+
 #define VULKAN_H_STATIC_DEFINE
 #define VK_NO_PROTOTYPES
 

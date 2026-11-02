@@ -2,6 +2,8 @@
 
 This document is for people maintaining the Vulkan backend. How to build, enable, run and configure it is documented in the README ("Vulkan renderer" and "Frame pacing (VSYNC and FRAME LIMIT)" sections); nothing here duplicates that. What this records is *why* the code looks the way it does, what the validation baseline is, which versions the work was measured on, and which known residuals are accepted.
 
+**AI authorship.** The Vulkan backend was written mostly with Qwen3.8-Flash-Next and in part with Qwen3.8-27B (both local), with initial scaffolding from Qwen3.6-35B-A3B, then reviewed over many human-directed rounds with review assistance from Claude. This document was also written with AI assistance. Commits do not mark which changes were AI-generated; see the README's "AI usage disclosure".
+
 **Evidence scope.** Every quantitative claim in this document was measured only on NVIDIA (Wayland/KWin, SDL2 API) and the Mesa llvmpipe software driver, both on Linux. AMD and Intel GPUs are unmeasured.
 
 # Architecture anchors
