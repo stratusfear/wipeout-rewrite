@@ -18,7 +18,7 @@ Environment variables the renderer responds to (user-facing detail in README):
 
 | variable | effect |
 |---|---|
-| `WIPEOUT_GPU=<index>` | force the Vulkan physical device (see README) |
+| `WIPEOUT_GPU=<index or name substring>` | force the Vulkan physical device; a pure integer is an enumeration index, anything else a case-insensitive substring of the device name (see README) |
 | `WIPEOUT_FRAME_DIAG=<N>` | print presented-frame interval statistics every N frames |
 | `VK_INSTANCE_LAYERS`, `VK_LAYER_SETTINGS_PATH` | enable the validation layer and point it at a settings file (validation runs only; the path must be absolute) |
 
@@ -144,7 +144,7 @@ Recorded 2026-11-02:
 - **Untested situations.** Multi-monitor refresh-rate changes (the limiter's cached refresh follows window events only), a zero-extent window on platforms that report one, and windows larger than the test display allows.
 - **Vulkan versus NVIDIA GL at texel ties** (one source row, every q-th row at certain ratios) is expected and accepted; see "Texel ties and the upscale".
 - The 240P llvmpipe raster micro-diff (0.22 to 0.30% against GL) is still uninvestigated.
-- `WIPEOUT_GPU` selects by numeric index only; a device-name substring selector is an open follow-up.
+- `WIPEOUT_GPU` index mode is still enumeration-order dependent — the order a loader lists devices in is not a stable contract across machines, which is why the device-name substring form exists and is the portable choice for scripts and reproducible reports.
 
 # Windows and macOS notes
 

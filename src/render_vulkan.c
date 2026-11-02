@@ -749,6 +749,23 @@ static mat4_t render_setup_2d_projection_mat(vec2i_t size) {
     );
 }
 
+/* ASCII case-insensitive substring test for device-name matching.
+ * strcasestr() is glibc-only and this file must build on MSVC too, so the
+ * lowering is done here; non-ASCII (UTF-8) bytes are compared unchanged. */
+static char ascii_tolower(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+static bool device_name_contains_ci(const char *name, const char *sub) {
+    if (!*sub) return true;
+    for (const char *n = name; *n; n++) {
+        const char *a = n, *b = sub;
+        while (*a && *b && ascii_tolower(*a) == ascii_tolower(*b)) { a++; b++; }
+        if (!*b) return true;
+    }
+    return false;
+}
+
 /* ------------------------------------------------------------------ */
 /* Public API (stubs for non-core functions)                            */
 /* ------------------------------------------------------------------ */
@@ -929,9 +946,13 @@ void render_init(vec2i_t screen_size) {
      *  - VK_KHR_swapchain supported (unconditionally enabled below),
      *  - a graphics queue family that can present to the surface.
      * Among suitable devices: DISCRETE > INTEGRATED > other types.
-     * WIPEOUT_GPU=<index> (index into this enumeration) forces one device,
-     * e.g. to override the preference order on hybrid-GPU systems; it must
-     * still pass the checks. */
+     * WIPEOUT_GPU forces one device, which must still pass the checks:
+     * a value that parses wholly as an integer is an index into this
+     * enumeration (negative values fail the range check); any other value
+     * is matched as an ASCII case-insensitive substring of the
+     * device name (enumeration order is not a stable contract across
+     * machines, which is why the name form exists; a device literally
+     * named "5" can therefore never be selected by name). */
     const char **rejection = (const char **)calloc(pd_count, sizeof(const char *));
     vulkan_state.physical_device = VK_NULL_HANDLE;
     int best_rank = -1; /* 3 discrete, 2 integrated, 1 other, 0 CPU */
@@ -941,14 +962,51 @@ void render_init(vec2i_t screen_size) {
     if (force_env) {
         char *end = NULL;
         long v = strtol(force_env, &end, 10);
-        if (end == force_env || *end != '\0' || v < 0 || v >= (long)pd_count) {
-            fprintf(stderr, "WIPEOUT_GPU=\"%s\" is not a device index (valid: 0..%u)\n",
-                    force_env, pd_count - 1);
-            free(phys_devices);
-            free(rejection);
-            goto cleanup;
+        if (end != force_env && *end == '\0') {
+            /* Pure integer: index mode (unchanged semantics). */
+            if (v < 0 || v >= (long)pd_count) {
+                fprintf(stderr, "WIPEOUT_GPU=\"%s\" is not a device index "
+                        "(valid: 0..%u; other values are matched as device-name substrings)\n",
+                        force_env, pd_count - 1);
+                free(phys_devices);
+                free(rejection);
+                goto cleanup;
+            }
+            forced_index = (int)v;
+        } else {
+            /* Name-substring mode: exactly one matching device or a hard error
+             * listing the candidates — a selector that would have to guess on
+             * a box with identical GPUs should say so, not pick silently. */
+            int matches = 0, match_index = -1;
+            for (uint32_t i = 0; i < pd_count; i++) {
+                VkPhysicalDeviceProperties props = {0};
+                vkGetPhysicalDeviceProperties_fn(phys_devices[i], &props);
+                if (device_name_contains_ci(props.deviceName, force_env)) {
+                    matches++;
+                    match_index = (int)i;
+                }
+            }
+            if (matches == 1) {
+                forced_index = match_index;
+            } else {
+                if (matches == 0) {
+                    fprintf(stderr, "WIPEOUT_GPU=\"%s\" matched no devices; available:", force_env);
+                } else {
+                    fprintf(stderr, "WIPEOUT_GPU=\"%s\" matches %d devices:", force_env, matches);
+                }
+                for (uint32_t i = 0; i < pd_count; i++) {
+                    VkPhysicalDeviceProperties props = {0};
+                    vkGetPhysicalDeviceProperties_fn(phys_devices[i], &props);
+                    if (matches == 0 || device_name_contains_ci(props.deviceName, force_env)) {
+                        fprintf(stderr, " \"%s\"", props.deviceName);
+                    }
+                }
+                fprintf(stderr, "\n");
+                free(phys_devices);
+                free(rejection);
+                goto cleanup;
+            }
         }
-        forced_index = (int)v;
     }
 
     for (uint32_t i = 0; i < pd_count; i++) {
