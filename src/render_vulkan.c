@@ -527,8 +527,9 @@ static struct vulkan_state {
     /* Game-pass pipelines: one per blend mode. Depth test/write and cull mode
      * are dynamic state (extendedDynamicState, Vulkan 1.3 core) — issued
      * per-flush via vkCmdSet* after the pipeline bind in render_flush. Front
-     * face is always CLOCKWISE in the game pass (see render_flush), so it is
-     * not a dimension at all. */
+     * face is always COUNTER_CLOCKWISE in the game pass (matches GL; baked
+     * into the pipelines in create_game_pipeline), so it is not a dimension
+     * at all. */
     VkPipeline game_pipelines[2]; /* [blend_mode] */
     VkPipeline post_pipelines[NUM_RENDER_POST_EFFECTS];
     render_post_effect_t current_post_effect;
@@ -4208,8 +4209,10 @@ void render_flush(void) {
      * game_update) must reach the atlas before the first draw that could
      * sample them. render_flush_pending_textures records the transfers into
      * a separate upload command buffer and submits it to the same graphics
-     * queue, waiting for completion (vkQueueWaitIdle), so the copies execute
-     * ahead of this frame's draw commands — the active rendering scope is
+     * queue, ahead of this frame's commands in queue order, and signals the
+     * timeline semaphore on the submit — upload completion is tracked
+     * lazily, there is no vkQueueWaitIdle here — so the copies execute
+     * ahead of this frame's draw commands. The active rendering scope is
      * never interrupted, and the dynamic viewport/scissor state plus all
      * bindings persist unchanged. */
     if (vulkan_state.pending_uploads_len > 0) {
