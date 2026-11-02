@@ -244,6 +244,8 @@ Enable it with CMake `-DRENDERER=VULKAN` (the `Makefile` does not support it); i
 
 **Validation layers:** the renderer is expected to run clean under the Khronos validation layer (`VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation ./wipeout`); the only reports during a validated run are the loader's own env-var warnings and one known best-practices hint about a 96-byte dedicated allocation.
 
+**Maintainer notes:** the design decisions, validation baseline, tested versions, and known limitations of this backend are recorded in [docs/VULKAN.md](docs/VULKAN.md).
+
 # Running
 
 This repository does not contain the assets (textures, 3d models etc.) required to run the game. This code mostly assumes to have the PSX NTSC data, but some menu models from the PC version are required as well. Both of these can be easily found on archive.org and similar sites. The music (optional) needs to be provided in [QOA format](https://github.com/phoboslab/qoa). The intro video as MPEG1.
