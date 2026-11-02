@@ -51,12 +51,14 @@ static PFN_vkVoidFunction vk_get_proc(const char *name, VkInstance instance) {
 
 /* Global typed function pointers — required when VK_NO_PROTOTYPES is defined */
 static PFN_vkCreateInstance                         vkCreateInstance_fn;
+static PFN_vkEnumerateInstanceExtensionProperties   vkEnumerateInstanceExtensionProperties_fn;
 static PFN_vkDestroyInstance                        vkDestroyInstance_fn;
 static PFN_vkEnumeratePhysicalDevices               vkEnumeratePhysicalDevices_fn;
 static PFN_vkEnumerateDeviceExtensionProperties     vkEnumerateDeviceExtensionProperties_fn;
 static PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties_fn;
 static PFN_vkGetPhysicalDeviceProperties            vkGetPhysicalDeviceProperties_fn;
 static PFN_vkGetPhysicalDeviceFeatures2              vkGetPhysicalDeviceFeatures2_fn;
+static PFN_vkGetPhysicalDeviceProperties2            vkGetPhysicalDeviceProperties2_fn;
 static PFN_vkGetPhysicalDeviceSurfaceSupportKHR     vkGetPhysicalDeviceSurfaceSupportKHR_fn;
 static PFN_vkGetPhysicalDeviceSurfaceFormatsKHR     vkGetPhysicalDeviceSurfaceFormatsKHR_fn;
 static PFN_vkGetPhysicalDeviceSurfacePresentModesKHR vkGetPhysicalDeviceSurfacePresentModesKHR_fn;
@@ -170,6 +172,38 @@ static PFN_vkUpdateDescriptorSets                   vkUpdateDescriptorSets_fn;
     }
 #define LOAD_FN_NULL(ptr, name) LOAD_FN(ptr, name, VK_NULL_HANDLE)
 #define LOAD_FN_INSTANCE(ptr, name) LOAD_FN(ptr, name, vulkan_state.instance)
+
+static bool instance_extension_available(const char *name) {
+    uint32_t count = 0;
+    if (!vkEnumerateInstanceExtensionProperties_fn ||
+        vkEnumerateInstanceExtensionProperties_fn(NULL, &count, NULL) != VK_SUCCESS || count == 0) {
+        return false;
+    }
+    VkExtensionProperties *props = (VkExtensionProperties *)calloc(count, sizeof(VkExtensionProperties));
+    if (!props) { return false; }
+    bool found = false;
+    if (vkEnumerateInstanceExtensionProperties_fn(NULL, &count, props) != VK_SUCCESS) { count = 0; }
+    for (uint32_t i = 0; i < count && !found; i++) {
+        found = strcmp(props[i].extensionName, name) == 0;
+    }
+    free(props);
+    return found;
+}
+
+static bool device_extension_available(VkPhysicalDevice dev, const char *name) {
+    uint32_t count = 0;
+    vkEnumerateDeviceExtensionProperties_fn(dev, NULL, &count, NULL);
+    if (count == 0) { return false; }
+    VkExtensionProperties *props = (VkExtensionProperties *)calloc(count, sizeof(VkExtensionProperties));
+    if (!props) { return false; }
+    bool found = false;
+    if (vkEnumerateDeviceExtensionProperties_fn(dev, NULL, &count, props) != VK_SUCCESS) { count = 0; }
+    for (uint32_t i = 0; i < count && !found; i++) {
+        found = strcmp(props[i].extensionName, name) == 0;
+    }
+    free(props);
+    return found;
+}
 
 /* ------------------------------------------------------------------ */
 /* Device function loading (via vkGetDeviceProcAddr)                  */
@@ -730,6 +764,7 @@ void render_init(vec2i_t screen_size) {
 
     /* -- Phase 1: Load global functions (resolvable with NULL instance) -- */
     LOAD_FN_NULL(vkCreateInstance_fn, vkCreateInstance)
+    LOAD_FN_NULL(vkEnumerateInstanceExtensionProperties_fn, vkEnumerateInstanceExtensionProperties)
 
     /* -- Phase 2: Create VkInstance -- */
     uint32_t sdl_ext_count = 0;
@@ -756,14 +791,35 @@ void render_init(vec2i_t screen_size) {
         total_ext_count++;
     }
 
+    /* Portability drivers (MoltenVK) are hidden from enumeration unless the
+     * instance enables VK_KHR_portability_enumeration and sets the matching
+     * create flag; without it vkCreateInstance can fail with
+     * VK_ERROR_INCOMPATIBLE_DRIVER on macOS. Only request it when the loader
+     * offers it, and skip it if SDL already added it. */
+    bool want_portability = instance_extension_available(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    for (uint32_t i = 0; i < sdl_ext_count && want_portability; i++) {
+        if (strcmp(sdl_exts[i], VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0) {
+            want_portability = false;
+        }
+    }
+    if (want_portability) {
+        total_ext_count++;
+    }
+
     exts = (const char **)calloc(total_ext_count, sizeof(const char *));
     if (!exts) { die("Failed to allocate extension list"); }
 
-    memcpy(exts, sdl_exts, sdl_ext_count * sizeof(const char *));
+    uint32_t ext_fill = sdl_ext_count;
+    if (sdl_ext_count > 0) {
+        memcpy(exts, sdl_exts, sdl_ext_count * sizeof(const char *));
+    }
+    if (want_portability) {
+        exts[ext_fill++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+    }
 
     VkDebugUtilsMessengerCreateInfoEXT debug_ci = {0};
     if (want_debug) {
-        exts[sdl_ext_count] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+        exts[ext_fill++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
         debug_ci.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
         debug_ci.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
                                    VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
@@ -778,6 +834,9 @@ void render_init(vec2i_t screen_size) {
     instance_ci.enabledExtensionCount = total_ext_count;
     instance_ci.ppEnabledExtensionNames = exts;
     instance_ci.pNext = want_debug ? &debug_ci : NULL;
+    if (want_portability) {
+        instance_ci.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
 
     VkApplicationInfo app_info = {0};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -803,6 +862,7 @@ void render_init(vec2i_t screen_size) {
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceQueueFamilyProperties_fn, vkGetPhysicalDeviceQueueFamilyProperties)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceProperties_fn, vkGetPhysicalDeviceProperties)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceFeatures2_fn, vkGetPhysicalDeviceFeatures2)
+    LOAD_FN_INSTANCE(vkGetPhysicalDeviceProperties2_fn, vkGetPhysicalDeviceProperties2)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceSurfaceSupportKHR_fn, vkGetPhysicalDeviceSurfaceSupportKHR)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceSurfaceFormatsKHR_fn, vkGetPhysicalDeviceSurfaceFormatsKHR)
     LOAD_FN_INSTANCE(vkGetPhysicalDeviceSurfacePresentModesKHR_fn, vkGetPhysicalDeviceSurfacePresentModesKHR)
@@ -971,6 +1031,15 @@ void render_init(vec2i_t screen_size) {
         VkPhysicalDeviceProperties pd_props = {0};
         vkGetPhysicalDeviceProperties_fn(vulkan_state.physical_device, &pd_props);
         printf("Vulkan: selected device [%s]\n", pd_props.deviceName);
+        /* Two ICDs can expose the same GPU name (e.g. MoltenVK and
+         * KosmicKrisp); the driver id/info tells them apart. */
+        VkPhysicalDeviceDriverProperties drv_props = {0};
+        drv_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+        VkPhysicalDeviceProperties2 pd_props2 = {0};
+        pd_props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        pd_props2.pNext = &drv_props;
+        vkGetPhysicalDeviceProperties2_fn(vulkan_state.physical_device, &pd_props2);
+        printf("Vulkan: driver [%s] [%s]\n", drv_props.driverName, drv_props.driverInfo);
         if (pd_props.apiVersion < VK_API_VERSION_1_3) {
             fprintf(stderr, "Selected device reports Vulkan %u.%u.%u; this app requires 1.3\n",
                     VK_API_VERSION_MAJOR(pd_props.apiVersion),
@@ -1101,15 +1170,22 @@ void render_init(vec2i_t screen_size) {
     /* The game-pass pipelines use core 1.0 dynamic states (viewport, scissor,
      * depth bias) plus the extended dynamic states depth test/write enable
      * and cull mode (see game_pipelines / render_flush); front face stays
-     * static CLOCKWISE. No device extension is needed for any of it. */
-    const char *device_exts[1] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+     * static COUNTER_CLOCKWISE. No device extension is needed for any of it.
+     * A portability device (MoltenVK) must have VK_KHR_portability_subset
+     * enabled when it advertises it; the string literal is used because the
+     * macro sits behind VK_ENABLE_BETA_EXTENSIONS. */
+    const char *device_exts[2] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    uint32_t device_ext_count = 1;
+    if (device_extension_available(vulkan_state.physical_device, "VK_KHR_portability_subset")) {
+        device_exts[device_ext_count++] = "VK_KHR_portability_subset";
+    }
 
     VkDeviceCreateInfo device_ci = {0};
     device_ci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     device_ci.queueCreateInfoCount = 1;
     device_ci.pQueueCreateInfos = &queue_ci;
     device_ci.pNext = &features2;
-    device_ci.enabledExtensionCount = 1;
+    device_ci.enabledExtensionCount = device_ext_count;
     device_ci.ppEnabledExtensionNames = device_exts;
     device_ci.enabledLayerCount = 0;
 
